@@ -1,0 +1,736 @@
+
+
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("survcomp", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+memory.limit(size=100000000)
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc) # for c-index
+library(survival)
+library(caret)  # for creating folds
+library(stringr)
+library(probably)
+library(pracma)
+library(xgboost)
+```
+
+## Load Data
+
+```{r}
+# load
+relax = fread('../../data/relax_cohort2/all_data2.csv')
+strict = fread('../../data/strict_cohort2/all_data.csv')
+```
+
+
+## PREVENT Coefficients and Formulas
+
+```{r}
+# PREVENT model coefficients for 5-year risk
+prevent_coefficients_5yr <- list(
+  female_cvd = matrix(c(
+    0.7939329, 0.0305239, -0.1606857, -0.2394003, 0.360078, 0.8667604,
+    0.5360739, 0.6045917, 0.0433769, 0.3151672, -0.1477655, -0.0663612,
+    0.1197879, -0.0819715, 0.0306769, -0.0946348, -0.27057, -0.078715,
+    -0.1637806, -4.165859
+  ), nrow = 20, ncol = 1),
+  male_cvd = matrix(c(
+    0.7688528, 0.0736174, -0.0954431, -0.4347345, 0.3362658, 0.7692857,
+    0.4386871, 0.5378979, 0.0164827, 0.288879, -0.1337349, -0.0475924,
+    0.150273, -0.0517874, 0.0191169, -0.1049477, -0.2251948, -0.0895067,
+    -0.1543702, -3.889299
+  ), nrow = 20, ncol = 1),
+  female_ascvd = matrix(c(
+    0.7198830247, 0.1176967025, -0.1511850059, -0.0835357979, 0.3592852056,
+    0.8348584771, 0.4831078053, 0.4864619076, 0.039777901, 0.2265308946,
+    -0.0592373982, -0.0395761989, 0.0844423026, -0.0567838997,
+    0.0325691998, -0.1035984978, -0.241754204, -0.0791141987,
+    -0.167149201, -4.691118
+  ), nrow = 20, ncol = 1),
+  male_ascvd = matrix(c(
+    0.7099847198, 0.1658663005, -0.1144284979, -0.2837212086, 0.3239977062,
+    0.7189596891, 0.3956972957, 0.369007498, 0.0203619003, 0.2036522031,
+    -0.0865581036, -0.0322915986, 0.1145630032, -0.0300005004,
+    0.0232746992, -0.0927024037, -0.2018525004, -0.0970527008,
+    -0.1217081025, -4.371798
+  ), nrow = 20, ncol = 1),
+  female_hf = matrix(c(
+    0.8998234868, -0.4559771121, 0.3576504886, 1.038346052, 0.5839160085,
+    -0.0072293999, 0.2997705936, 0.7451637983, 0.0557086989, 0.3534441888,
+    -0.0981511027, -0.0946663022, -0.3581041098, -0.1159453019,
+    -0.003878, -0.1884288937, -5.23739
+  ), nrow = 17, ncol = 1),
+  male_hf = matrix(c(
+    0.8972641826, -0.6811466217, 0.3634460866, 0.9237759709, 0.5023735762,
+    -0.0485840999, 0.3726929128, 0.6926916838, 0.0251826998, 0.2980921865,
+    -0.0497731008, -0.1289200932, -0.3040924072, -0.140168801,
+    0.0068126, -0.179777801, -4.873372
+  ), nrow = 17, ncol = 1)
+)
+
+# PREVENT model coefficients for 10-year risk
+prevent_coefficients_10yr <- list(
+  female_cvd = matrix(c(
+    0.7939329, 0.0305239, -0.1606857, -0.2394003, 0.360078, 0.8667604,
+    0.5360739, 0.6045917, 0.0433769, 0.3151672, -0.1477655, -0.0663612,
+    0.1197879, -0.0819715, 0.0306769, -0.0946348, -0.27057, -0.078715,
+    -0.1637806, -3.307728
+  ), nrow = 20, ncol = 1),
+  male_cvd = matrix(c(
+    0.7688528, 0.0736174, -0.0954431, -0.4347345, 0.3362658, 0.7692857,
+    0.4386871, 0.5378979, 0.0164827, 0.288879, -0.1337349, -0.0475924,
+    0.150273, -0.0517874, 0.0191169, -0.1049477, -0.2251948, -0.0895067,
+    -0.1543702, -3.031168
+  ), nrow = 20, ncol = 1),
+  female_ascvd = matrix(c(
+    0.7198830247, 0.1176967025, -0.1511850059, -0.0835357979, 0.3592852056,
+    0.8348584771, 0.4831078053, 0.4864619076, 0.039777901, 0.2265308946,
+    -0.0592373982, -0.0395761989, 0.0844423026, -0.0567838997,
+    0.0325691998, -0.1035984978, -0.241754204, -0.0791141987,
+    -0.167149201, -3.819974899
+  ), nrow = 20, ncol = 1),
+  male_ascvd = matrix(c(
+    0.7099847198, 0.1658663005, -0.1144284979, -0.2837212086, 0.3239977062,
+    0.7189596891, 0.3956972957, 0.369007498, 0.0203619003, 0.2036522031,
+    -0.0865581036, -0.0322915986, 0.1145630032, -0.0300005004,
+    0.0232746992, -0.0927024037, -0.2018525004, -0.0970527008,
+    -0.1217081025, -3.500654936
+  ), nrow = 20, ncol = 1),
+  female_hf = matrix(c(
+    0.8998234868, -0.4559771121, 0.3576504886, 1.038346052, 0.5839160085,
+    -0.0072293999, 0.2997705936, 0.7451637983, 0.0557086989, 0.3534441888,
+    -0.0981511027, -0.0946663022, -0.3581041098, -0.1159453019,
+    -0.003878, -0.1884288937, -4.310409069
+  ), nrow = 17, ncol = 1),
+  male_hf = matrix(c(
+    0.8972641826, -0.6811466217, 0.3634460866, 0.9237759709, 0.5023735762,
+    -0.0485840999, 0.3726929128, 0.6926916838, 0.0251826998, 0.2980921865,
+    -0.0497731008, -0.1289200932, -0.3040924072, -0.140168801,
+    0.0068126, -0.179777801, -3.946391106
+  ), nrow = 17, ncol = 1)
+)
+
+# Define predictors for each outcome
+prevent_formulas <- list(
+  cvd = c(
+    "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+    "smoker", "egfr1", "egfr2", "antihtn", "statin",
+    "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+    "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+  ),
+  ascvd = c(
+    "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+    "smoker", "egfr1", "egfr2", "antihtn", "statin",
+    "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+    "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+  ),
+  hf = c(
+    "age", "sbp1", "sbp2", "diabetes", "smoker", "bmi1", "bmi2",
+    "egfr1", "egfr2", "antihtn", "sbp2treat", "agesbp2",
+    "agediabetes", "agecursmk", "agebmi2", "ageegfr1", "cons"
+  )
+)
+
+prevent_coefficients <- list(
+  `5` = prevent_coefficients_5yr,
+  `10` = prevent_coefficients_10yr
+)
+```
+
+
+
+## Logic:
+# For strict cohort: use 5 fold cv stratified by sex to assign recalibrated prevent risk score to each patient
+# For relax cohort: for patients in strict, copy paste; If not, use strict as training startified by sex to assign risk score
+
+## Recalibrated PREVENT
+
+```{r}
+compute_recalibrated_risks <- function(relax, strict, year, outcome) {
+  formula_vars <- prevent_formulas[[outcome]]
+  colname <- paste0(year, "y_recal_", outcome)
+  strict[, (colname) := NA_real_]
+
+  # Step 1: Calculate recalibrated PREVENT for strict cohort
+  for (gender in c(0, 1)) {
+    gender_data <- strict[sex == gender]
+    gender_idx <- which(strict$sex == gender)
+    coef_key <- paste0(ifelse(gender == 1, "female", "male"), "_", outcome)
+    coef <- prevent_coefficients[[as.character(year)]][[coef_key]]
+
+    mat <- as.matrix(gender_data[, ..formula_vars])
+    log_odds <- mat %*% coef
+    predictions <- rep(NA, nrow(gender_data))
+
+    set.seed(123)
+    folds <- createFolds(gender_data[[paste0(outcome, "_", year, "y")]], k = 5)
+    for (i in 1:5) {
+      train_idx <- unlist(folds[-i])
+      test_idx <- folds[[i]]
+      train_log_odds <- log_odds[train_idx]
+      test_log_odds <- log_odds[test_idx]
+
+      surv_obj <- Surv(
+        gender_data[[paste0("time2", outcome, "_", year, "y")]][train_idx],
+        gender_data[[paste0(outcome, "_", year, "y")]][train_idx]
+      )
+      km <- survfit(surv_obj ~ 1)
+      S_obs <- summary(km, times = year, extend = TRUE)$surv[1]
+
+      mean_xbeta <- mean(train_log_odds)
+      centered_train <- train_log_odds - mean_xbeta
+      S0 <- fminbnd(function(S0) abs(mean(S0^exp(centered_train)) - S_obs), 0, 1)$x
+
+      centered_test <- test_log_odds - mean(test_log_odds)
+      recal <- 1 - S0^exp(centered_test)
+      predictions[test_idx] <- recal
+    }
+
+    strict[gender_idx, (colname) := predictions]
+  }
+
+  # Step 2: Copy over recalibrated risk values to relax based on PATID
+  relax <- merge(
+    relax,
+    strict[, .(PATID, strict_recal = get(colname))],
+    by = "PATID",
+    all.x = TRUE
+  )
+  relax[, (colname) := strict_recal]
+  relax[, strict_recal := NULL]
+
+  # Step 3: Recalibrate for patients in relax but not in strict
+  # Identify relax patients not in strict and their indices
+  relax_not_in_strict_idx <- which(is.na(relax[[colname]]))
+  relax_not_in_strict <- relax[relax_not_in_strict_idx]
+
+  for (gender in c(0, 1)) {
+    # Prepare training data from ENTIRE strict cohort for this gender
+    train_data <- strict[sex == gender]
+    
+    # Subset test data by gender
+    test_data <- relax_not_in_strict[sex == gender]
+    test_data_idx <- which(relax_not_in_strict$sex == gender)
+    
+    # Prepare coefficient and predictor matrix
+    coef_key <- paste0(ifelse(gender == 1, "female", "male"), "_", outcome)
+    coef <- prevent_coefficients[[as.character(year)]][[coef_key]]
+    
+    # Prepare training matrix
+    train_mat <- as.matrix(train_data[, ..formula_vars])
+    train_log_odds <- train_mat %*% coef
+    
+    # Prepare test matrix
+    test_mat <- as.matrix(test_data[, ..formula_vars])
+    test_log_odds <- test_mat %*% coef
+    
+    # Compute observed survival for training data
+    surv_obj <- Surv(
+      train_data[[paste0("time2", outcome, "_", year, "y")]],
+      train_data[[paste0(outcome, "_", year, "y")]]
+    )
+    km <- survfit(surv_obj ~ 1)
+    S_obs <- summary(km, times = year, extend = TRUE)$surv[1]
+    
+    # Recalibration process
+    mean_xbeta <- mean(train_log_odds)
+    centered_train <- train_log_odds - mean_xbeta
+    S0 <- fminbnd(function(S0) abs(mean(S0^exp(centered_train)) - S_obs), 0, 1)$x
+    
+    # Prepare test predictions
+    mean_test_xbeta <- mean(test_log_odds)
+    centered_test <- test_log_odds - mean_test_xbeta
+    recal <- 1 - S0^exp(centered_test)
+    
+    # Update relax cohort using the original indices
+    relax[relax_not_in_strict_idx[test_data_idx], (colname) := recal]
+  }
+
+  return(list(relax = relax, strict = strict))
+}
+```
+
+## MLM Recalibrated
+
+```{r}
+compute_xgb_recalibrated_risks <- function(relax, strict, year, outcome, n_iter = 50) {
+  # Column names
+  col_prevent <- paste0(year, "y_prevent_", outcome)
+  col_time    <- paste0("time2", outcome, "_", year, "y")
+  col_event   <- paste0(outcome, "_", year, "y")
+  col_xgb     <- paste0(year, "y_xgb_", outcome)
+  
+  # Initialize output column
+  strict[, (col_xgb) := NA_real_]
+  features <- c(col_prevent, "age", "sex")
+  mono_cstr <- "(1,1,0)"  # monotonicity constraints remain the same
+  
+  # 1) Outer 5-fold CV on strict
+  set.seed(123)
+  outer_flds <- createFolds(strict[[col_event]], k = 5)
+  
+  for (i in seq_along(outer_flds)) {
+    test_i      <- outer_flds[[i]]
+    train_val_i <- setdiff(seq_len(nrow(strict)), test_i)
+    dv          <- strict[train_val_i]
+    
+    # 80/20 split for train/validation
+    set.seed(100 + i)
+    tv_i  <- createDataPartition(dv[[col_event]], p = 0.8, list = FALSE)
+    tr_i  <- tv_i
+    vl_i  <- setdiff(seq_len(nrow(dv)), tr_i)
+    
+    # 10-fold CV for random search
+    set.seed(200 + i)
+    inner_flds <- createFolds(dv[[col_event]][tr_i], k = 10)
+    best_score <- Inf
+    best_pars  <- NULL
+    
+    for (j in seq_len(n_iter)) {
+      # sample hyperparameters
+      params <- list(
+        objective            = "survival:cox",
+        eval_metric          = "cox-nloglik",
+        booster              = "gbtree",
+        tree_method          = "exact",
+        eta                  = 0.02,
+        gamma                = 1,
+        max_delta_step       = 2,
+        monotone_constraints = mono_cstr,
+        max_depth            = sample(2:8, 1),
+        subsample            = runif(1),
+        colsample_bynode     = runif(1),
+        min_child_weight     = runif(1, 0, 20)
+      )
+      
+      # inner CV
+      cv_scores <- vapply(inner_flds, function(v_i) {
+        tr_i_inner <- setdiff(tr_i, v_i)
+        
+        # encode label = time * sign(event)
+        t_tr  <- dv[[col_time]][tr_i_inner]
+        e_tr  <- dv[[col_event]][tr_i_inner]
+        lbl_tr<- t_tr * ifelse(e_tr==1, +1L, -1L)
+        dtr   <- xgb.DMatrix(data = as.matrix(dv[tr_i_inner, ..features]), label = lbl_tr)
+        
+        t_vl  <- dv[[col_time]][v_i]
+        e_vl  <- dv[[col_event]][v_i]
+        lbl_vl<- t_vl * ifelse(e_vl==1, +1L, -1L)
+        dvl   <- xgb.DMatrix(data = as.matrix(dv[v_i, ..features]), label = lbl_vl)
+        
+        m <- xgb.train(
+          params               = params,
+          data                 = dtr,
+          nrounds              = 1000,
+          watchlist            = list(val = dvl),
+          early_stopping_rounds= 20,
+          verbose              = 0
+        )
+        m$best_score
+      }, numeric(1))
+      
+      mc <- mean(cv_scores)
+      if (mc < best_score) {
+        best_score <- mc
+        best_pars  <- params
+      }
+    }
+    
+    # final train on dv[tr_i]/validate dv[vl_i]
+    t_tr  <- dv[[col_time]][tr_i]
+    e_tr  <- dv[[col_event]][tr_i]
+    lbl_tr<- t_tr * ifelse(e_tr==1, +1L, -1L)
+    dtrain<- xgb.DMatrix(data = as.matrix(dv[tr_i, ..features]), label = lbl_tr)
+    
+    t_vl  <- dv[[col_time]][vl_i]
+    e_vl  <- dv[[col_event]][vl_i]
+    lbl_vl<- t_vl * ifelse(e_vl==1, +1L, -1L)
+    dval  <- xgb.DMatrix(data = as.matrix(dv[vl_i, ..features]), label = lbl_vl)
+    
+    mdl <- xgb.train(
+      params               = best_pars,
+      data                 = dtrain,
+      nrounds              = 1000,
+      watchlist            = list(val = dval),
+      early_stopping_rounds= 20,
+      verbose              = 0
+    )
+    
+    # calibrate baseline
+    preds_tr <- predict(mdl, dtrain)
+    km_tr    <- survfit(Surv(dv[[col_time]][tr_i], dv[[col_event]][tr_i]) ~ 1)
+    S_obs    <- summary(km_tr, times = year, extend = TRUE)$surv[1]
+    cen_tr   <- preds_tr - mean(preds_tr)
+    S0       <- fminbnd(function(s) abs(mean(s^exp(cen_tr)) - S_obs), 0, 1)$x
+    
+    # predict + calibrate on test
+    dtest    <- xgb.DMatrix(as.matrix(strict[test_i, ..features]))
+    preds_te <- predict(mdl, dtest)
+    cen_te   <- preds_te - mean(preds_te)
+    risk_te  <- 1 - S0^exp(cen_te)
+    
+    strict[test_i, (col_xgb) := risk_te]
+  }
+  
+  # 2) copy into relax
+  relax <- merge(
+    relax,
+    strict[, .(PATID, xgb_pred = get(col_xgb))],
+    by    = "PATID",
+    all.x = TRUE
+  )
+  setnames(relax, "xgb_pred", col_xgb)
+  
+  # 3) final retrain on all strict data (no sex stratification)
+  df_tr <- strict
+  
+  # 80/20 split
+  set.seed(300)
+  split_i <- createDataPartition(df_tr[[col_event]], p=0.8, list=FALSE)
+  tr_i    <- split_i
+  vl_i    <- setdiff(seq_len(nrow(df_tr)), tr_i)
+  
+  # inner CV random-search
+  set.seed(400)
+  inner_flds <- createFolds(df_tr[[col_event]][tr_i], k=10)
+  best_score <- Inf
+  best_pars  <- NULL
+  
+  for (j in seq_len(n_iter)) {
+    params <- list(
+      objective            = "survival:cox",
+      eval_metric          = "cox-nloglik",
+      booster              = "gbtree",
+      tree_method          = "exact",
+      eta                  = 0.02,
+      gamma                = 1,
+      max_delta_step       = 2,
+      monotone_constraints = mono_cstr,
+      max_depth            = sample(2:8,1),
+      subsample            = runif(1),
+      colsample_bynode     = runif(1),
+      min_child_weight     = runif(1,0,20)
+    )
+    
+    cv_scores <- vapply(inner_flds, function(v_i) {
+      tr_i_in <- setdiff(tr_i, v_i)
+      
+      t_tr  <- df_tr[[col_time]][tr_i_in]
+      e_tr  <- df_tr[[col_event]][tr_i_in]
+      lbl_tr<- t_tr * ifelse(e_tr==1,1L,-1L)
+      dtr   <- xgb.DMatrix(as.matrix(df_tr[tr_i_in, ..features]), label=lbl_tr)
+      
+      t_vl  <- df_tr[[col_time]][v_i]
+      e_vl  <- df_tr[[col_event]][v_i]
+      lbl_vl<- t_vl * ifelse(e_vl==1,1L,-1L)
+      dvl   <- xgb.DMatrix(as.matrix(df_tr[v_i, ..features]), label=lbl_vl)
+      
+      m <- xgb.train(
+        params               = params,
+        data                 = dtr,
+        nrounds              = 1000,
+        watchlist            = list(val = dvl),
+        early_stopping_rounds= 20,
+        verbose              = 0
+      )
+      m$best_score
+    }, numeric(1))
+    
+    mc <- mean(cv_scores)
+    if (mc < best_score) {
+      best_score <- mc
+      best_pars  <- params
+    }
+  }
+  
+  # train final on all df_tr
+  t_all  <- df_tr[[col_time]]
+  e_all  <- df_tr[[col_event]]
+  lbl_all<- t_all * ifelse(e_all==1,1L,-1L)
+  d_all  <- xgb.DMatrix(as.matrix(df_tr[, ..features]), label=lbl_all)
+  
+  mdl_all <- xgb.train(
+    params               = best_pars,
+    data                 = d_all,
+    nrounds              = 1000,
+    watchlist            = list(val = d_all),
+    early_stopping_rounds= 20,
+    verbose              = 0
+  )
+  
+  # calibrate on df_tr
+  preds_all    <- predict(mdl_all, d_all)
+  km_all       <- survfit(Surv(t_all, e_all) ~ 1)
+  S_obs_all    <- summary(km_all, times = year, extend = TRUE)$surv[1]
+  cen_all      <- preds_all - mean(preds_all)
+  S0_all       <- fminbnd(function(s) abs(mean(s^exp(cen_all)) - S_obs_all), 0, 1)$x
+  
+  # predict on relax for any missing values
+  idx_rel <- which(is.na(relax[[col_xgb]]))
+  if (length(idx_rel)) {
+    dr <- xgb.DMatrix(as.matrix(relax[idx_rel, ..features]))
+    pr <- predict(mdl_all, dr)
+    cr <- pr - mean(pr)
+    relax[idx_rel, (col_xgb) := 1 - S0_all^exp(cr)]
+  }
+  
+  list(strict = strict, relax = relax)
+}
+```
+
+
+## Model Predicted vs KM Estimated Calibration Ratio
+
+```{r}
+# ---- Function to calculate KM vs Predicted ratios ----
+calc_km_ratio <- function(df, year, outcome) {
+  risk_cols <- list(
+    prevent = paste0(year, "y_prevent_", outcome),
+    recal   = paste0(year, "y_recal_", outcome),
+    xgb   = paste0(year, "y_xgb_", outcome),
+    local   = paste0(year, "y_local_", outcome),
+    race    = paste0(year, "y_race_", outcome),
+    sdoh    = paste0(year, "y_sdoh_", outcome)
+  )
+  time_col <- paste0("time2", outcome, "_", year, "y")
+  event_col <- paste0(outcome, "_", year, "y")
+
+  subgroup_defs <- list(
+    general_male     = df$sex == 0,
+    general_female   = df$sex == 1,
+    white_male       = df$sex == 0 & df$race == "White",
+    black_male       = df$sex == 0 & df$race == "Black",
+    asian_male       = df$sex == 0 & df$race == "Asian",
+    white_female     = df$sex == 1 & df$race == "White",
+    black_female     = df$sex == 1 & df$race == "Black",
+    asian_female     = df$sex == 1 & df$race == "Asian",
+    adi_bin1         = df$ADI_NATRANK_BIN == 1,
+    adi_bin2         = df$ADI_NATRANK_BIN == 2,
+    adi_bin3         = df$ADI_NATRANK_BIN == 3,
+    adi_bin4         = df$ADI_NATRANK_BIN == 4,
+    commercial       = df$insurance_group == "Commercial",
+    medicaid         = df$insurance_group == "Medicaid",
+    medicare         = df$insurance_group == "Medicare",
+    no_insurance     = df$insurance_group == "No Insurance",
+    other_insurance  = df$insurance_group == "Other Insurance"
+  )
+
+  result <- data.frame()
+  for (sub in names(subgroup_defs)) {
+    subgroup_data <- df[subgroup_defs[[sub]], ]
+
+    surv_obj <- Surv(subgroup_data[[time_col]], subgroup_data[[event_col]])
+    km <- survfit(surv_obj ~ 1)
+    obs <- 1 - summary(km, times = year, extend = TRUE)$surv[1]
+
+    means <- sapply(risk_cols, function(col) mean(subgroup_data[[col]], na.rm = TRUE))
+    ratios <- means / obs
+    result <- rbind(result, data.frame(subgroup = sub, t(ratios)))
+  }
+
+  colnames(result)[-1] <- c("prevent", "recal", "xgb", "local", "race", "sdoh")
+  return(result)
+}
+```
+
+
+## Main Loop
+
+```{r}
+# ---- MAIN: Loop over outcomes and years ----
+outcomes <- c("cvd", "ascvd", "hf")
+years <- c(5, 10)
+final_ratios <- list()
+
+# Column and model row orders
+ordered_cols <- c(
+  "general_female", "general_male", 
+  "white_female", "white_male", 
+  "asian_female", "asian_male", 
+  "black_female", "black_male", 
+  "adi_bin1", "adi_bin2", "adi_bin3", "adi_bin4", 
+  "commercial", "medicaid", "medicare", "no_insurance", "other_insurance"
+)
+
+pretty_names <- c(
+  "general_female" = "Female", "general_male" = "Male",
+  "white_female" = "White Female", "white_male" = "White Male",
+  "asian_female" = "Asian Female", "asian_male" = "Asian Male",
+  "black_female" = "Black Female", "black_male" = "Black Male",
+  "adi_bin1" = "ADI BIN 1", "adi_bin2" = "ADI BIN 2", "adi_bin3" = "ADI BIN 3", "adi_bin4" = "ADI BIN 4",
+  "commercial" = "Commercial", "medicaid" = "Medicaid", "medicare" = "Medicare",
+  "no_insurance" = "No Insurance", "other_insurance" = "Other Insurance"
+)
+
+model_names <- c(
+  "PREVENT", 
+  "Recalibrated PREVENT", 
+  "MLM Recalibrated",
+  "Duke Local", 
+  "Duke Local(Race)", 
+  "Duke Local(Race&SDOH)"
+)
+
+for (y in years) {
+  for (event in outcomes) {
+    cat(paste0("Processing ", y, "y ", event, "...\n"))
+    
+    # Step 1: Recalibration
+    # Standard PREVENT recalibration
+    tmp1   <- compute_recalibrated_risks(relax, strict, y, event)
+    relax  <- tmp1$relax
+    strict <- tmp1$strict
+    
+    # 2) XGBoost based ("MLM") recalibration
+    tmp2   <- compute_xgb_recalibrated_risks(relax, strict, y, event, n_iter = 20)
+    relax  <- tmp2$relax
+    strict <- tmp2$strict
+
+    # Step 2: Compute KM-based ratios on RELAX
+    ratio_df <- calc_km_ratio(relax, y, event)
+
+    # Step 3: Pivot table: model rows subgroup cols
+    ratio_matrix <- t(ratio_df[, -1])  # transpose values only
+    colnames(ratio_matrix) <- ratio_df$subgroup
+    rownames(ratio_matrix) <- model_names
+
+    ratio_wide_df <- as.data.frame(ratio_matrix)
+    
+    # Ensure correct column order and rename to pretty names
+    ratio_wide_df <- ratio_wide_df[, ordered_cols, drop = FALSE]
+    colnames(ratio_wide_df) <- pretty_names[ordered_cols]
+    ratio_wide_df <- cbind(Model = rownames(ratio_wide_df), ratio_wide_df)
+
+    # Step 4: Save
+    fname <- paste0("results/calibration_ratio_", y, "y_", event, "_across_models.csv")
+    write.csv(ratio_wide_df, file = fname, row.names = FALSE)
+    final_ratios[[paste0(y, "_", event)]] <- ratio_wide_df
+  }
+}
+
+cat("All recalibrated risks computed and calibration ratios saved for Relax cohort across models.\n")
+
+# Calculate Calibration Ratio for Strict Cohort across Models
+for (y in years) {
+  for (event in outcomes) {
+    cat(paste0("Processing ", y, "y ", event, " for strict cohort...\n"))
+    
+    # Step 1: Compute KM-based ratios on STRICT cohort instead of RELAX
+    ratio_df <- calc_km_ratio(strict, y, event)
+    
+    # Step 2: Pivot table: model rows subgroup cols
+    ratio_matrix <- t(ratio_df[, -1])  # transpose values only
+    colnames(ratio_matrix) <- ratio_df$subgroup
+    rownames(ratio_matrix) <- model_names
+    ratio_wide_df <- as.data.frame(ratio_matrix)
+    
+    # Ensure correct column order and rename to pretty names
+    ratio_wide_df <- ratio_wide_df[, ordered_cols, drop = FALSE]
+    colnames(ratio_wide_df) <- pretty_names[ordered_cols]
+    ratio_wide_df <- cbind(Model = rownames(ratio_wide_df), ratio_wide_df)
+    
+    # Step 3: Save with "strict" in the filename to differentiate
+    fname <- paste0("results/calibration_ratio_strict_", y, "y_", event, "_across_models.csv")
+    write.csv(ratio_wide_df, file = fname, row.names = FALSE)
+    final_ratios[[paste0(y, "_", event)]] <- ratio_wide_df
+  }
+}
+
+cat("All calibration ratios computed and saved for Strict cohort across models.\n")
+```
+
+## Save
+
+```{r}
+write.csv(strict, '../../data/strict_cohort2/all_data_with_mlm.csv', row.names = FALSE)
+write.csv(relax, '../../data/relax_cohort2/all_data_with_mlm.csv', row.names = FALSE)
+```
+
+
+## Across Cohorts: Original PREVENT, Recalibrated PREVENT, and XGBoost Recalibrated
+
+
+```{r}
+# ---- Subgroup-based Calibration Ratio by Cohort ----
+calculate_cohortwise_ratios <- function(cohort_df, cohort_name, year, outcome, model_col) {
+  time_col <- paste0("time2", outcome, "_", year, "y")
+  event_col <- paste0(outcome, "_", year, "y")
+
+  subgroup_defs <- list(
+    Female          = cohort_df$sex == 1,
+    Male            = cohort_df$sex == 0,
+    `White Female`  = cohort_df$sex == 1 & cohort_df$race == "White",
+    `White Male`    = cohort_df$sex == 0 & cohort_df$race == "White",
+    `Asian Female`  = cohort_df$sex == 1 & cohort_df$race == "Asian",
+    `Asian Male`    = cohort_df$sex == 0 & cohort_df$race == "Asian",
+    `Black Female`  = cohort_df$sex == 1 & cohort_df$race == "Black",
+    `Black Male`    = cohort_df$sex == 0 & cohort_df$race == "Black",
+    `ADI BIN 1`     = cohort_df$ADI_NATRANK_BIN == 1,
+    `ADI BIN 2`     = cohort_df$ADI_NATRANK_BIN == 2,
+    `ADI BIN 3`     = cohort_df$ADI_NATRANK_BIN == 3,
+    `ADI BIN 4`     = cohort_df$ADI_NATRANK_BIN == 4,
+    Commercial      = cohort_df$insurance_group == "Commercial",
+    Medicaid        = cohort_df$insurance_group == "Medicaid",
+    Medicare        = cohort_df$insurance_group == "Medicare",
+    `No Insurance`  = cohort_df$insurance_group == "No Insurance",
+    `Other Insurance` = cohort_df$insurance_group == "Other Insurance"
+  )
+
+  ratios <- c(Cohort = cohort_name)
+
+  for (label in names(subgroup_defs)) {
+    subgroup_data <- cohort_df[subgroup_defs[[label]], ]
+
+    surv_obj <- Surv(subgroup_data[[time_col]], subgroup_data[[event_col]])
+    km <- survfit(surv_obj ~ 1)
+    obs_rate <- 1 - summary(km, times = year, extend = TRUE)$surv[1]
+    pred_mean <- mean(subgroup_data[[model_col]], na.rm = TRUE)
+    ratios[label] <- pred_mean / obs_rate
+  }
+
+  return(as.data.frame(t(ratios)))
+}
+```
+
+
+
+## Main Loop
+
+```{r}
+models <- list(
+  prevent = function(year, outcome) paste0(year, "y_prevent_", outcome),
+  recal   = function(year, outcome) paste0(year, "y_recal_", outcome),
+  xgb     = function(year, outcome) paste0(year, "y_xgb_",     outcome)
+)
+
+for (y in c(5, 10)) {
+  for (event in c("cvd", "ascvd", "hf")) {
+    for (model_name in names(models)) {
+      colname <- models[[model_name]](y, event)
+
+      cat(sprintf("Saving calibration for %sy %s - model: %s\n", y, event, model_name))
+
+      # Calculate calibration ratios for both cohorts
+      strict_ratios <- calculate_cohortwise_ratios(strict, "Cohort Strict", y, event, colname)
+      relax_ratios  <- calculate_cohortwise_ratios(relax,  "Cohort Relax",  y, event, colname)
+
+      # Combine and save
+      combined <- rbind(strict_ratios, relax_ratios)
+      out_path <- sprintf("results/calibration_ratio_%sy_%s_%s_across_cohorts.csv", y, event, model_name)
+      fwrite(combined, file = out_path)
+    }
+  }
+}
+```
+
+
+
+
+

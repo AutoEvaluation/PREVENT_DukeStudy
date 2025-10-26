@@ -1,0 +1,140 @@
+
+
+
+## Calibration Ratio across Cohorts: Original PREVENT, MLM Recalibrated and Recalibrated PREVENT
+
+
+```{r}
+library(fmsb)
+
+# ---------------------------
+# Define file names dynamically
+# ---------------------------
+years <- c(5, 10)
+events <- c("cvd", "ascvd", "hf")
+models <- c("prevent", "xgb","recal")
+event_labels <- c("CVD", "ASCVD", "HF")
+
+# Generate file paths and titles
+files <- c()
+titles <- c()
+outputs <- c()
+
+for (y in years) {
+  for (i in seq_along(events)) {
+    for (m in models) {
+      file <- sprintf("../calibration/exp3/calibration_ratio_%sy_%s_%s_across_cohorts.csv", y, events[i], m)
+      files <- c(files, file)
+      outputs <- c(outputs, sprintf("plots/calibration_ratio_%sy_%s_%s_across_cohorts.png", y, events[i], m))
+
+      plot_name <- ifelse(m == "prevent", 
+                          "PREVENT", 
+                          ifelse(m == "xgb", "MLM Recalibrated", "Recalibrated PREVENT"))
+      display_year <- ifelse(y == 10, 8, y)
+      titles <- c(titles, sprintf("%s Year %s - %s", display_year, toupper(event_labels[i]), plot_name))
+    }
+  }
+}
+
+# ---------------------------
+# Plot each radar chart and save as high-res PNG
+# ---------------------------
+par(mfrow = c(1, 1), mar = c(5, 2, 2, 2))
+
+for (i in seq_along(files)) {
+  df <- read.csv(files[i])
+  rownames(df) <- df$Cohort
+  df <- df[, -1]
+
+  all_axes <- colnames(df)
+  local_min <- floor(min(df, na.rm = TRUE) * 1000) / 1000
+  local_max <- ceiling(max(df, na.rm = TRUE) * 1000) / 1000
+  reference_row <- rep(1, length(all_axes))
+
+  radar_data <- rbind(
+    rep(local_max, length(all_axes)),
+    rep(local_min, length(all_axes)),
+    df,
+    reference_row
+  )
+  rownames(radar_data) <- c("max", "min", rownames(df), "Reference Line (1.0)")
+  colnames(radar_data) <- gsub("\\.", " ", colnames(radar_data))
+
+  seg_count <- 6
+  step <- (local_max - local_min) / seg_count
+  ring_labels <- round(seq(local_min, local_max, by = step), 3)
+
+  palette_colors <- c("#66C2A5", "#FC8D62")  # strict, relax
+  plot_colors <- c(palette_colors[1:nrow(df)], "red")
+  plot_ltys <- c(rep(2, nrow(df)), 1)
+  plot_lwds <- c(rep(2, nrow(df)), 1.5)
+
+  # Save to file
+  png(outputs[i], width = 3000, height = 2500, res = 300)
+
+  radarchart(
+    radar_data,
+    axistype = 1,
+    seg = seg_count,
+    caxislabels = ring_labels,
+    pcol = plot_colors,
+    plty = plot_ltys,
+    plwd = plot_lwds,
+    pfcol = NA,
+    cglcol = "grey",
+    cglty = 1,
+    cglwd = 0.8,
+    axislabcol = "grey",
+    vlcex = 0.6
+  )
+
+  title(main = titles[i])
+  par(xpd = TRUE)
+
+  legend(
+    "bottom",
+    inset = c(0, -0.1),
+    legend = c(rownames(df), "Reference Line (1.0)"),
+    col = plot_colors,
+    lty = plot_ltys,
+    lwd = plot_lwds,
+    bty = "n",
+    horiz = TRUE,
+    cex = 0.6
+  )
+
+  par(xpd = FALSE)
+  dev.off()
+
+  # Also print the same plot to screen
+  radarchart(
+    radar_data,
+    axistype = 1,
+    seg = seg_count,
+    caxislabels = ring_labels,
+    pcol = plot_colors,
+    plty = plot_ltys,
+    plwd = plot_lwds,
+    pfcol = NA,
+    cglcol = "grey",
+    cglty = 1,
+    cglwd = 0.8,
+    axislabcol = "grey",
+    vlcex = 0.5
+  )
+  title(main = titles[i])
+  par(xpd = TRUE)
+  legend(
+    "bottom",
+    inset = c(0, -0.1),
+    legend = c(rownames(df), "Reference Line (1.0)"),
+    col = plot_colors,
+    lty = plot_ltys,
+    lwd = plot_lwds,
+    bty = "n",
+    horiz = TRUE,
+    cex = 0.6
+  )
+  par(xpd = FALSE)
+}
+```

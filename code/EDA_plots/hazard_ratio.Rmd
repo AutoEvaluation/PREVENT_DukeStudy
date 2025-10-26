@@ -1,0 +1,400 @@
+
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("survcomp", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+memory.limit(size=100000000)
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc) # for c-index
+library(survival)
+library(caret)  # for creating folds
+library(stringr)
+library(probably)
+```
+
+## Coefficients and Formulas
+
+```{r}
+## Duke Local(Race)
+local_race_formulas <- list(
+  cvd = as.formula("Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1 + race"),
+  ascvd = as.formula("Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1 + race"),
+  hf = as.formula("Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1 + race")
+)
+
+## Duke Local
+local_formulas <- list(
+  cvd = as.formula("Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1"),
+  ascvd = as.formula("Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1"),
+  hf = as.formula("Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1")
+)
+
+## PREVENT
+# coefficients for each gender & outcome combination
+fcvd = c(
+    0.7939329, 0.0305239, -0.1606857, -0.2394003, 0.360078, 0.8667604,
+    0.5360739, 0.6045917, 0.0433769, 0.3151672, -0.1477655, -0.0663612,
+    0.1197879, -0.0819715, 0.0306769, -0.0946348, -0.27057, -0.078715,
+    -0.1637806, -3.307728
+  )
+mcvd = c(
+    0.7688528, 0.0736174, -0.0954431, -0.4347345, 0.3362658, 0.7692857,
+    0.4386871, 0.5378979, 0.0164827, 0.288879, -0.1337349, -0.0475924,
+    0.150273, -0.0517874, 0.0191169, -0.1049477, -0.2251948, -0.0895067,
+    -0.1543702, -3.031168
+  )
+fascvd = c(
+    0.7198830247, 0.1176967025, -0.1511850059, -0.0835357979, 0.3592852056,
+    0.8348584771, 0.4831078053, 0.4864619076, 0.039777901, 0.2265308946,
+    -0.0592373982, -0.0395761989, 0.0844423026, -0.0567838997,
+    0.0325691998, -0.1035984978, -0.241754204, -0.0791141987,
+    -0.167149201, -3.819974899
+  )
+mascvd = c(
+    0.7099847198, 0.1658663005, -0.1144284979, -0.2837212086, 0.3239977062,
+    0.7189596891, 0.3956972957, 0.369007498, 0.0203619003, 0.2036522031,
+    -0.0865581036, -0.0322915986, 0.1145630032, -0.0300005004,
+    0.0232746992, -0.0927024037, -0.2018525004, -0.0970527008,
+    -0.1217081025, -3.500654936
+  )
+fhf = c(
+    0.8998234868, -0.4559771121, 0.3576504886, 1.038346052, 0.5839160085,
+    -0.0072293999, 0.2997705936, 0.7451637983, 0.0557086989, 0.3534441888,
+    -0.0981511027, -0.0946663022, -0.3581041098, -0.1159453019,
+    -0.003878, -0.1884288937, -4.310409069
+  )
+mhf = c(
+    0.8972641826, -0.6811466217, 0.3634460866, 0.9237759709, 0.5023735762,
+    -0.0485840999, 0.3726929128, 0.6926916838, 0.0251826998, 0.2980921865,
+    -0.0497731008, -0.1289200932, -0.3040924072, -0.140168801,
+    0.0068126, -0.179777801, -3.946391106
+  )
+
+prevent_coefficients <- list(
+  female_cvd = matrix(fcvd, nrow = 20, ncol = 1),
+  male_cvd = matrix(mcvd, nrow = 20, ncol = 1),
+  female_ascvd = matrix(fascvd, nrow = 20, ncol = 1),
+  male_ascvd = matrix(mascvd, nrow = 20, ncol = 1),
+  female_hf = matrix(fhf, nrow = 17, ncol = 1),
+  male_hf = matrix(mhf, nrow = 17, ncol = 1)
+)
+
+# predictors for each outcome
+prevent_formulas <- list(
+  cvd = c(
+      "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+      "smoker", "egfr1", "egfr2", "antihtn", "statin",
+      "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+      "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+    ),
+  ascvd = c(
+      "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+      "smoker", "egfr1", "egfr2", "antihtn", "statin",
+      "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+      "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+    ),
+  hf = c(
+      "age", "sbp1", "sbp2", "diabetes", "smoker", "bmi1", "bmi2",
+      "egfr1", "egfr2", "antihtn", "sbp2treat", "agesbp2",
+      "agediabetes", "agecursmk", "agebmi2", "ageegfr1", "cons"
+  )
+)
+```
+
+## Load data and factorize categorical variables
+
+```{r}
+# load data
+data = fread('../../data/strict_cohort2/transformed_data.csv')
+
+# split SDOH into quartiles
+data <- data %>%
+  mutate(
+    ADI_NATRANK_BIN = cut(
+      ADI_NATRANK,
+      breaks = seq(0, 100, by = 25),
+      labels = 1:4,
+      include.lowest = TRUE))
+
+
+data$diabetes <- as.factor(data$diabetes)
+data$smoker <- as.factor(data$smoker)
+data$antihtn <- as.factor(data$antihtn)
+data$statin <- as.factor(data$statin)
+data$race <- as.factor(data$race)
+data$ADI_NATRANK_BIN <- as.factor(data$ADI_NATRANK_BIN)
+# set "White" as the reference level due to large sample size
+data$race <- relevel(data$race, ref = "White")
+```
+
+1.  Local Cox(Race)
+
+```{r}
+# define outcomes
+outcomes <- c('cvd', 'ascvd', 'hf')
+# list to store the data frames
+result_dataframes <- list()
+
+# loop through outcomes
+for (outcome in outcomes) {
+  
+  formula <- local_race_formulas[[outcome]]
+  
+  for (gender in c(0, 1)) {
+    # filter by gender
+    data_gender <- data[data$sex == gender, ]
+    
+    # fit cox model on gender-specific data
+    cox_model <- coxph(formula, data = data_gender)
+    
+    # get exponentiated coefficients, lower and upper bounds
+    summary_cox <- summary(cox_model)
+    beta_coefficients <- exp(summary_cox$coefficients[, "coef"])
+    lower_bounds <- summary_cox$conf.int[, "lower .95"]
+    upper_bounds <- summary_cox$conf.int[, "upper .95"]
+    
+    # create data frame for gender-specific results
+    gender_label <- ifelse(gender == 0, "Male", "Female")
+    result_df <- data.frame(
+      Variable = rownames(summary_cox$coefficients),
+      Estimate = beta_coefficients,
+      Lower = lower_bounds,
+      Upper = upper_bounds,
+      Outcome = outcome,
+      Gender = gender_label,
+      model = 'Local Cox(Race)'
+    )
+    
+    # save to list
+    result_dataframes[[paste(outcome, gender_label, sep = "_")]] <- result_df
+  }
+}
+```
+
+2.  Local Cox
+
+```{r}
+# loop through each outcomes
+for (outcome in outcomes) {
+  
+  formula <- local_formulas[[outcome]]
+  
+  for (gender in c(0, 1)) {
+    # filter data by gender
+    data_gender <- data[data$sex == gender, ]
+    
+    # fit cox model on gender-specific data
+    cox_model <- coxph(formula, data = data_gender)
+    
+    # get exponentiated coefficients, lower and upper bounds
+    summary_cox <- summary(cox_model)
+    beta_coefficients <- exp(summary_cox$coefficients[, "coef"])
+    lower_bounds <- summary_cox$conf.int[, "lower .95"]
+    upper_bounds <- summary_cox$conf.int[, "upper .95"]
+    
+    # create dataframe for current iteration
+    gender_label <- ifelse(gender == 0, "Male", "Female")
+    new_rows <- data.frame(
+      Variable = rownames(summary_cox$coefficients),
+      Estimate = beta_coefficients,
+      Lower = lower_bounds,
+      Upper = upper_bounds,
+      Outcome = outcome,
+      Gender = gender_label,
+      model = 'Local Cox'
+    )
+    
+    # get key for this event gender combination
+    event_gender_key <- paste(outcome, gender_label, sep = "_")
+    
+    # append each dataframe
+    if (event_gender_key %in% names(result_dataframes)) {
+      result_dataframes[[event_gender_key]] <- rbind(result_dataframes[[event_gender_key]], new_rows)
+    } else {
+      result_dataframes[[event_gender_key]] <- new_rows # check if key errors
+    }
+  }
+}
+```
+
+
+3.  PREVENT
+
+```{r}
+# cvd male
+new_rows <- data.frame(
+      Variable = prevent_formulas[['cvd']][1:length(prevent_formulas[['cvd']])-1],
+      Estimate = exp(mcvd[1:length(mcvd)-1]),
+      Lower = exp(mcvd[1:length(mcvd)-1]),
+      Upper = exp(mcvd[1:length(mcvd)-1]),
+      Outcome = 'cvd',
+      Gender = 'Male',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['cvd_Male']] <- rbind(result_dataframes[['cvd_Male']], new_rows)
+
+# cvd female
+new_rows <- data.frame(
+      Variable = prevent_formulas[['cvd']][1:length(prevent_formulas[['cvd']])-1],
+      Estimate = exp(fcvd[1:length(fcvd)-1]),
+      Lower = exp(fcvd[1:length(fcvd)-1]),
+      Upper = exp(fcvd[1:length(fcvd)-1]),
+      Outcome = 'cvd',
+      Gender = 'Female',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['cvd_Female']] <- rbind(result_dataframes[['cvd_Female']], new_rows)
+
+# ascvd male
+new_rows <- data.frame(
+      Variable = prevent_formulas[['ascvd']][1:length(prevent_formulas[['ascvd']])-1],
+      Estimate = exp(mascvd[1:length(mascvd)-1]),
+      Lower = exp(mascvd[1:length(mascvd)-1]),
+      Upper = exp(mascvd[1:length(mascvd)-1]),
+      Outcome = 'ascvd',
+      Gender = 'Male',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['ascvd_Male']] <- rbind(result_dataframes[['ascvd_Male']], new_rows)
+
+# ascvd female
+new_rows <- data.frame(
+      Variable = prevent_formulas[['ascvd']][1:length(prevent_formulas[['ascvd']])-1],
+      Estimate = exp(fascvd[1:length(fascvd)-1]),
+      Lower = exp(fascvd[1:length(fascvd)-1]),
+      Upper = exp(fascvd[1:length(fascvd)-1]),
+      Outcome = 'ascvd',
+      Gender = 'Female',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['ascvd_Female']] <- rbind(result_dataframes[['ascvd_Female']], new_rows)
+
+
+# hf male
+new_rows <- data.frame(
+      Variable = prevent_formulas[['hf']][1:length(prevent_formulas[['hf']])-1],
+      Estimate = exp(mhf[1:length(mhf)-1]),
+      Lower = exp(mhf[1:length(mhf)-1]),
+      Upper = exp(mhf[1:length(mhf)-1]),
+      Outcome = 'hf',
+      Gender = 'Male',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['hf_Male']] <- rbind(result_dataframes[['hf_Male']], new_rows)
+
+# hf female
+new_rows <- data.frame(
+      Variable = prevent_formulas[['hf']][1:length(prevent_formulas[['hf']])-1],
+      Estimate = exp(fhf[1:length(fhf)-1]),
+      Lower = exp(fhf[1:length(fhf)-1]),
+      Upper = exp(fhf[1:length(fhf)-1]),
+      Outcome = 'hf',
+      Gender = 'Female',
+      model = 'PREVENT'
+    )
+
+result_dataframes[['hf_Female']] <- rbind(result_dataframes[['hf_Female']], new_rows)
+```
+
+## Coefficients Comparison Plot
+
+```{r}
+# unify feature names
+rename_variables <- function(df) {
+  df$Variable <- gsub("statin1", "statin", df$Variable)
+  df$Variable <- gsub("smoker1", "smoker", df$Variable)
+  df$Variable <- gsub("antihtn1", "antihtn", df$Variable)
+  df$Variable <- gsub("diabetes1", "diabetes", df$Variable)
+  return(df)
+}
+result_dataframes <- lapply(result_dataframes, rename_variables)
+
+# loop through dataframes
+for (key in names(result_dataframes)) {
+  df <- result_dataframes[[key]]
+  
+  # adjust titles
+  event_gender <- str_split(key, "_", simplify = TRUE)
+  event <- str_to_upper(event_gender[1])
+  gender <- event_gender[2]
+  plot_title <- paste("Hazard Ratio Comparison", event, gender, "Models")
+  
+  model_order <- c("PREVENT", "Local Cox")
+  df$model <- factor(df$model, levels = model_order)
+  
+  # plot
+  p <- ggplot(df, aes(x = Variable, y = Estimate, color = model)) +
+    geom_point(
+      position = position_dodge(width = 0.6), 
+      size = 3
+    ) +
+    geom_errorbar(
+      aes(ymin = Lower, ymax = Upper),
+      position = position_dodge(width = 0.6), 
+      width = 0.3
+    ) +
+    # Custom color mapping to match your example image
+    scale_color_manual(values = c(
+      "PREVENT"         = "#66C2A5",
+      "Local Cox"       = "#FC8D62"
+    )) +
+    labs(
+      title = plot_title,
+      x = "Variables",
+      y = "Hazard Ratio (95% CI)"
+    ) +
+    theme_minimal() +
+    theme(
+      # Put legend on top
+      legend.position = "top",
+      # Center and style the title
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      # Tilt x-axis labels
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      # Remove legend title
+      legend.title = element_blank(),
+      # Add some vertical space between panels (if facets are used later)
+      panel.spacing = unit(1, "lines")
+    ) +
+    # Give extra space between x-axis categories
+    scale_x_discrete(expand = expansion(mult = c(0.1, 0.1)))
+  
+  # Save the plot
+  filename <- paste0("plots/", gsub(" ", "_", tolower(plot_title)), ".png")
+  # Open high-resolution PNG
+  png(filename, width = 3500, height = 2500, res = 500)
+  print(p)
+  # Close the device to save the file
+  dev.off()
+  
+  # Print the plot to console as well
+  print(p)
+}
+```

@@ -1,0 +1,276 @@
+
+
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(survival)
+library(survAUC)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(data.table)
+```
+
+## Load Relax Data
+
+```{r}
+# load
+#relax = fread('../../data/relax_cohort2/all_data2.csv')
+# load new data with mgm recalibrated model
+relax = fread('../calibration/exp3/relax_all_data.csv')
+```
+
+```{r}
+# Function to calculate c-index for a specific subgroup
+calculate_cindex <- function(data, model, event, time_horizon) {
+  # Construct column names based on time horizon
+  risk_col  <- paste0(time_horizon, "y_", model, "_", event)
+  event_col <- paste0(event, "_", time_horizon, "y")
+  
+  # Extract data
+  risk_scores <- data[[risk_col]]
+  event_status <- data[[event_col]]
+  
+  # Compute C-index using rcorr.cens
+  c_index_result <- rcorr.cens(risk_scores, event_status)["C Index"]
+  
+  return(as.numeric(c_index_result))
+}
+
+# Main function to run analysis and generate CSV files
+run_analysis <- function(relax) {
+  # Define parameters
+  models <- c("prevent", "xgb", "local", "race", "dnn")
+  model_names <- c("PREVENT", "MLM Recalibrated", "Duke Local", "Duke Local(Race)", "DNN")
+  events <- c("cvd", "ascvd", "hf")
+  time_horizons <- c("5", "10")
+  
+  # Total iterations for progress tracking
+  total_iterations <- length(events) * length(time_horizons)
+  current_iteration <- 0
+  
+  # Pre-compute subsets of data to avoid repeated filtering
+  female_data <- relax[relax$sex == 1, ]
+  male_data <- relax[relax$sex == 0, ]
+  white_female_data <- relax[relax$race == 'White' & relax$sex == 1, ]
+  white_male_data <- relax[relax$race == 'White' & relax$sex == 0, ]
+  asian_female_data <- relax[relax$race == 'Asian' & relax$sex == 1, ]
+  asian_male_data <- relax[relax$race == 'Asian' & relax$sex == 0, ]
+  black_female_data <- relax[relax$race == 'Black' & relax$sex == 1, ]
+  black_male_data <- relax[relax$race == 'Black' & relax$sex == 0, ]
+  adi_bin_data <- list()
+  for(bin in 1:4) {
+    adi_bin_data[[bin]] <- relax[relax$ADI_NATRANK_BIN == bin, ]
+  }
+  
+  # Pre-compute insurance group subsets
+  insurance_groups <- c("Commercial", "Medicaid", "Medicare", "No Insurance", "Other Insurance")
+  insurance_data <- list()
+  for(i in 1:length(insurance_groups)) {
+    insurance_data[[i]] <- relax[relax$insurance_group == insurance_groups[i], ]
+  }
+  
+  # Loop through each event and time horizon
+  for(event in events) {
+    for(time_horizon in time_horizons) {
+      # Initialize result dataframe with subgroups
+      result_df <- data.frame(
+        Model = character(0),
+        Female = numeric(0),
+        Male = numeric(0),
+        `White Female` = numeric(0),
+        `White Male` = numeric(0),
+        `Asian Female` = numeric(0),
+        `Asian Male` = numeric(0),
+        `Black Female` = numeric(0),
+        `Black Male` = numeric(0),
+        `ADI BIN 1` = numeric(0),
+        `ADI BIN 2` = numeric(0),
+        `ADI BIN 3` = numeric(0),
+        `ADI BIN 4` = numeric(0),
+        Commercial = numeric(0),
+        Medicaid = numeric(0),
+        Medicare = numeric(0),
+        `No Insurance` = numeric(0),
+        `Other Insurance` = numeric(0),
+        stringsAsFactors = FALSE
+      )
+      
+      # Process each model
+      for(i in 1:length(models)) {
+        model <- models[i]
+        model_name <- model_names[i]
+        
+        # Initialize row with model name
+        row <- c(model_name, rep(NA, ncol(result_df) - 1))
+        
+        # Calculate c-index for each sex group
+        row[2] <- calculate_cindex(female_data, model, event, time_horizon)  # Female
+        row[3] <- calculate_cindex(male_data, model, event, time_horizon)    # Male
+        
+        # Calculate c-index for race-sex combinations
+        row[4] <- calculate_cindex(white_female_data, model, event, time_horizon)  # White Female
+        row[5] <- calculate_cindex(white_male_data, model, event, time_horizon)    # White Male
+        row[6] <- calculate_cindex(asian_female_data, model, event, time_horizon)  # Asian Female
+        row[7] <- calculate_cindex(asian_male_data, model, event, time_horizon)    # Asian Male
+        row[8] <- calculate_cindex(black_female_data, model, event, time_horizon)  # Black Female
+        row[9] <- calculate_cindex(black_male_data, model, event, time_horizon)    # Black Male
+        
+        # Calculate c-index for ADI bins
+        for(bin in 1:4) {
+          row[9 + bin] <- calculate_cindex(adi_bin_data[[bin]], model, event, time_horizon)
+        }
+        
+        # Calculate c-index for insurance groups
+        for(j in 1:length(insurance_groups)) {
+          row[13 + j] <- calculate_cindex(insurance_data[[j]], model, event, time_horizon)
+        }
+        
+        # Add row to result dataframe
+        result_df[i, ] <- row
+      }
+      
+      # Save to CSV
+      filename <- paste0("exp3/cindex_relax_", time_horizon, "y_", event, ".csv")
+      write.csv(result_df, filename, row.names = FALSE)
+      
+      # Update progress
+      current_iteration <- current_iteration + 1
+      cat(sprintf("\rProgress: %d/%d (%d%%)", current_iteration, total_iterations, 
+                  round(current_iteration/total_iterations*100)))
+      cat("\nSaved:", filename, "\n")
+    }
+  }
+  
+  cat("\nAnalysis completed. All files saved in the 'results' directory.\n")
+}
+
+# apply
+run_analysis(relax)
+```
+
+
+## Load Strict Data
+
+```{r}
+# load
+#strict = fread('../../data/strict_cohort2/all_data.csv')
+
+# load new data with mlm recalibrated model
+strict = fread('../calibration/exp3/strict_all_data.csv')
+```
+
+```{r}
+# Main function to run analysis and generate CSV files
+run_analysis <- function(strict) {
+  # Define parameters
+  models <- c("prevent", "xgb", "local", "race", "dnn")
+  model_names <- c("PREVENT", "MLM Recalibrated", "Duke Local", "Duke Local(Race)", "DNN")
+  events <- c("cvd", "ascvd", "hf")
+  time_horizons <- c("5", "10")
+  
+  # Total iterations for progress tracking
+  total_iterations <- length(events) * length(time_horizons)
+  current_iteration <- 0
+  
+  # Pre-compute subsets of data to avoid repeated filtering
+  female_data <- strict[strict$sex == 1, ]
+  male_data <- strict[strict$sex == 0, ]
+  white_female_data <- strict[strict$race == 'White' & strict$sex == 1, ]
+  white_male_data <- strict[strict$race == 'White' & strict$sex == 0, ]
+  asian_female_data <- strict[strict$race == 'Asian' & strict$sex == 1, ]
+  asian_male_data <- strict[strict$race == 'Asian' & strict$sex == 0, ]
+  black_female_data <- strict[strict$race == 'Black' & strict$sex == 1, ]
+  black_male_data <- strict[strict$race == 'Black' & strict$sex == 0, ]
+  adi_bin_data <- list()
+  for(bin in 1:4) {
+    adi_bin_data[[bin]] <- strict[strict$ADI_NATRANK_BIN == bin, ]
+  }
+  
+  # Pre-compute insurance group subsets
+  insurance_groups <- c("Commercial", "Medicaid", "Medicare", "No Insurance", "Other Insurance")
+  insurance_data <- list()
+  for(i in 1:length(insurance_groups)) {
+    insurance_data[[i]] <- strict[strict$insurance_group == insurance_groups[i], ]
+  }
+  
+  # Loop through each event and time horizon
+  for(event in events) {
+    for(time_horizon in time_horizons) {
+      # Initialize result dataframe with subgroups
+      result_df <- data.frame(
+        Model = character(0),
+        Female = numeric(0),
+        Male = numeric(0),
+        `White Female` = numeric(0),
+        `White Male` = numeric(0),
+        `Asian Female` = numeric(0),
+        `Asian Male` = numeric(0),
+        `Black Female` = numeric(0),
+        `Black Male` = numeric(0),
+        `ADI BIN 1` = numeric(0),
+        `ADI BIN 2` = numeric(0),
+        `ADI BIN 3` = numeric(0),
+        `ADI BIN 4` = numeric(0),
+        Commercial = numeric(0),
+        Medicaid = numeric(0),
+        Medicare = numeric(0),
+        `No Insurance` = numeric(0),
+        `Other Insurance` = numeric(0),
+        stringsAsFactors = FALSE
+      )
+      
+      # Process each model
+      for(i in 1:length(models)) {
+        model <- models[i]
+        model_name <- model_names[i]
+        
+        # Initialize row with model name
+        row <- c(model_name, rep(NA, ncol(result_df) - 1))
+        
+        # Calculate c-index for each sex group
+        row[2] <- calculate_cindex(female_data, model, event, time_horizon)  # Female
+        row[3] <- calculate_cindex(male_data, model, event, time_horizon)    # Male
+        
+        # Calculate c-index for race-sex combinations
+        row[4] <- calculate_cindex(white_female_data, model, event, time_horizon)  # White Female
+        row[5] <- calculate_cindex(white_male_data, model, event, time_horizon)    # White Male
+        row[6] <- calculate_cindex(asian_female_data, model, event, time_horizon)  # Asian Female
+        row[7] <- calculate_cindex(asian_male_data, model, event, time_horizon)    # Asian Male
+        row[8] <- calculate_cindex(black_female_data, model, event, time_horizon)  # Black Female
+        row[9] <- calculate_cindex(black_male_data, model, event, time_horizon)    # Black Male
+        
+        # Calculate c-index for ADI bins
+        for(bin in 1:4) {
+          row[9 + bin] <- calculate_cindex(adi_bin_data[[bin]], model, event, time_horizon)
+        }
+        
+        # Calculate c-index for insurance groups
+        for(j in 1:length(insurance_groups)) {
+          row[13 + j] <- calculate_cindex(insurance_data[[j]], model, event, time_horizon)
+        }
+        
+        # Add row to result dataframe
+        result_df[i, ] <- row
+      }
+      
+      # Save to CSV
+      filename <- paste0("exp3/cindex_strict_", time_horizon, "y_", event, ".csv")
+      write.csv(result_df, filename, row.names = FALSE)
+      
+      # Update progress
+      current_iteration <- current_iteration + 1
+      cat(sprintf("\rProgress: %d/%d (%d%%)", current_iteration, total_iterations, 
+                  round(current_iteration/total_iterations*100)))
+      cat("\nSaved:", filename, "\n")
+    }
+  }
+  
+  cat("\nAnalysis completed. All files saved in the 'results' directory.\n")
+}
+
+# apply
+run_analysis(strict)
+```

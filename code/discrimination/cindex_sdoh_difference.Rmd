@@ -1,0 +1,409 @@
+
+
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc)
+library(caret)
+library(survival)
+```
+
+## Diff between Duke SDOH and Duke
+
+## Load Data
+
+```{r}
+# load
+strict = fread('../../data/strict_cohort2/all_data.csv')
+relax = fread('../../data/relax_cohort2/all_data2.csv')
+```
+
+
+
+## Strict: Duke SDOH
+
+## Factorize Categorical Variable
+
+```{r}
+strict$diabetes <- as.factor(strict$diabetes)
+strict$smoker <- as.factor(strict$smoker)
+strict$antihtn <- as.factor(strict$antihtn)
+strict$statin <- as.factor(strict$statin)
+strict$race <- as.factor(strict$race)
+strict$ADI_NATRANK_BIN <- as.factor(strict$ADI_NATRANK_BIN)
+# set "White" as the reference level due to large sample size
+strict$race <- relevel(strict$race, ref = "White")
+
+relax$diabetes <- as.factor(relax$diabetes)
+relax$smoker <- as.factor(relax$smoker)
+relax$antihtn <- as.factor(relax$antihtn)
+relax$statin <- as.factor(relax$statin)
+relax$race <- as.factor(relax$race)
+relax$ADI_NATRANK_BIN <- as.factor(relax$ADI_NATRANK_BIN)
+# set "White" as the reference level due to large sample size
+relax$race <- relevel(relax$race, ref = "White")
+```
+
+
+```{r}
+# define function to perform cross-validation for Cox models and get risk scores and probabilities
+perform_cv_cox <- function(data, event_var, formula, folds = 5, year = NA) {
+  # set seed for reproducibility
+  set.seed(123)
+  
+  # create stratified folds on targeted event
+  folds_list <- createFolds(data[[event_var]], k = folds, list = TRUE)
+  
+  # initialize risk score vector
+  risk_scores <- numeric(nrow(data))
+  
+  # loop over each fold
+  for (i in seq_along(folds_list)) {
+    # split data into training and testing sets
+    test_index <- folds_list[[i]]
+    train_data <- data[-test_index, ]
+    test_data <- data[test_index, ]
+    
+    # fit Cox model
+    cox_model <- coxph(as.formula(formula), data = train_data)
+    cox_lp <- predict(cox_model, newdata = test_data, type = "lp")
+    baseline_surv <- survfit(cox_model)
+    ten_year <- summary(baseline_surv, times = year, extend = TRUE)$surv
+    
+    # get risk probabilities on test data
+    risk_scores[test_index] <- 1 - ten_year ^ exp(cox_lp)
+  }
+  
+  return(risk_scores)
+}
+```
+
+
+## Local Model
+
+
+```{r}
+sdoh_formulas <- list(
+  cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1 + ADI_NATRANK_BIN",
+  ascvd = "Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1 + ADI_NATRANK_BIN",
+  hf = "Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1 + ADI_NATRANK_BIN")
+
+
+outcome_list <- names(sdoh_formulas)
+
+# 10 year
+prefix <- "10y_sdoh_"
+for (outcome_name in outcome_list) {
+  for (gender_val in c(0, 1)) {
+    # filter gender
+    gender_indices <- which(strict$sex == gender_val)
+    gender_data <- strict[gender_indices, ]
+
+    # outcome-specific variables
+    event_var <- paste0(outcome_name, "_10y")
+    formula_str <- sdoh_formulas[[outcome_name]]
+    
+    # run cv
+    risk <- perform_cv_cox(
+      data = gender_data,
+      event_var = event_var,
+      formula = formula_str,
+      folds = 5,
+      year = 10)
+
+    # Create output column name and assign to correct rows
+    colname <- paste0(prefix, outcome_name)
+    strict[gender_indices, (colname) := risk]
+  }
+}
+
+# 5 year
+prefix <- "5y_sdoh_"
+for (outcome_name in outcome_list) {
+  for (gender_val in c(0, 1)) {
+    # filter gender
+    gender_indices <- which(strict$sex == gender_val)
+    gender_data <- strict[gender_indices, ]
+
+    # outcome-specific variables
+    event_var <- paste0(outcome_name, "_10y")
+    formula_str <- sdoh_formulas[[outcome_name]]
+    
+    # run cv
+    risk <- perform_cv_cox(
+      data = gender_data,
+      event_var = event_var,
+      formula = formula_str,
+      folds = 5,
+      year = 5)
+
+    # Create output column name and assign to correct rows
+    colname <- paste0(prefix, outcome_name)
+    strict[gender_indices, (colname) := risk]
+  }
+}
+```
+
+
+## Copy Pasre from Strict
+
+```{r}
+new_cols <- c("10y_sdoh_cvd", "10y_sdoh_ascvd", "10y_sdoh_hf",
+              "5y_sdoh_cvd", "5y_sdoh_ascvd", "5y_sdoh_hf")
+
+for (col in new_cols) {
+  relax[[col]] <- NA_real_
+}
+
+# Set keys for joining on PATID
+setkey(strict, PATID)
+setkey(relax, PATID)
+
+# copy paste
+for (col in new_cols) {
+  relax[strict, (col) := strict[[col]], on = "PATID"]}
+```
+
+
+## SDOH Models Trained on All Strict Cohort
+
+```{r}
+set.seed(123)
+
+sdoh_formulas <- list(
+  cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1 + ADI_NATRANK_BIN",
+  ascvd = "Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1 + ADI_NATRANK_BIN",
+  hf = "Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1 + ADI_NATRANK_BIN")
+
+formula_list <- list(
+  pure_sdoh = sdoh_formulas
+)
+
+# loop through each formula set
+for (form_name in names(formula_list)) {
+  formulas <- formula_list[[form_name]]
+  
+  for (event in names(formulas)) {
+    formula_str <- formulas[[event]]
+    
+    for (gender_val in c(0, 1)) {
+      gender_str <- ifelse(gender_val == 1, "female", "male")
+      df <- strict[sex == gender_val]
+      
+      # Fit Cox model
+      model <- coxph(as.formula(formula_str), data = df)
+      
+      # Save model
+      filename <- paste0("../model/", form_name, "_", event, "_", gender_str, ".rds")
+      saveRDS(model, file = filename)
+    }
+  }
+}
+```
+
+
+```{r}
+model_specs <- list(
+  list(file = "pure_sdoh_cvd", col = "5y_sdoh_cvd", year = 5, event = "cvd"),
+  list(file = "pure_sdoh_ascvd", col = "5y_sdoh_ascvd", year = 5, event = "ascvd"),
+  list(file = "pure_sdoh_hf", col = "5y_sdoh_hf", year = 5, event = "hf"),
+  list(file = "pure_sdoh_cvd", col = "10y_sdoh_cvd", year = 10, event = "cvd"),
+  list(file = "pure_sdoh_ascvd", col = "10y_sdoh_ascvd", year = 10, event = "ascvd"),
+  list(file = "pure_sdoh_hf", col = "10y_sdoh_hf", year = 10, event = "hf")
+)
+
+
+for (spec in model_specs) {
+  for (gender_val in c(0, 1)) {
+    gender_str <- ifelse(gender_val == 1, "female", "male")
+    
+    # Subset to rows of this gender
+    row_indices <- which(relax$sex == gender_val)
+    
+    # From those, find rows where the target risk column is missing
+    na_indices_in_group <- which(is.na(relax[[spec$col]][row_indices]))
+    
+    # Get actual global row indices to update later
+    target_indices <- row_indices[na_indices_in_group]
+    
+    # Subset of data to predict on
+    test_data <- relax[target_indices]
+    setDT(test_data)
+
+    # Load model
+    model_path <- paste0("../model/", spec$file, "_", gender_str, ".rds")
+    cox_model <- readRDS(model_path)
+    
+    # Predict linear predictors
+    cox_lp <- predict(cox_model, newdata = test_data, type = "lp")
+    
+    # Baseline survival at specified time
+    baseline_surv <- survfit(cox_model)
+    surv_val <- summary(baseline_surv, times = spec$year, extend = TRUE)$surv
+    
+    # Compute risk
+    risk <- 1 - surv_val ^ exp(cox_lp)
+    
+    # Assign predicted risk to the correct positions in the full data
+    relax[target_indices, (spec$col) := risk]
+  }
+}
+```
+
+
+## Bootstrapping
+
+```{r}
+# Function to calculate c-index
+calculate_cindex <- function(data, event_col, risk_col) {
+  result <- rcorr.cens(data[[risk_col]], data[[event_col]])
+  return(as.numeric(result["C Index"]))
+}
+
+# Main analysis function
+run_diff_bootstrap_analysis <- function(relax) {
+  events <- c("cvd", "ascvd", "hf")
+  time_horizons <- c("5", "10")
+  B <- 100
+
+  total_size <- nrow(relax)
+  sample_size <- 127151
+  scaling_factor <- sqrt(sample_size / (total_size - sample_size))
+
+  for (time_horizon in time_horizons) {
+    for (outcome in events) {
+      cat(sprintf("\nResults for %s (%s-year)\n", outcome, time_horizon))
+
+      sdoh_risk_col <- paste0(time_horizon, "y_sdoh_", outcome)
+      local_risk_col <- paste0(time_horizon, "y_local_", outcome)
+      event_col <- paste0(outcome, "_", time_horizon, "y")
+
+      # Define subgroup conditions
+      subgroup_conditions <- list(
+        general_male     = relax$sex == 0,
+        general_female   = relax$sex == 1,
+        asian_male       = relax$sex == 0 & relax$race == "Asian",
+        white_male       = relax$sex == 0 & relax$race == "White",
+        black_male       = relax$sex == 0 & relax$race == "Black",
+        asian_female     = relax$sex == 1 & relax$race == "Asian",
+        white_female     = relax$sex == 1 & relax$race == "White",
+        black_female     = relax$sex == 1 & relax$race == "Black",
+        commercial       = relax$insurance_group == "Commercial",
+        medicaid         = relax$insurance_group == "Medicaid",
+        medicare         = relax$insurance_group == "Medicare",
+        no_insurance     = relax$insurance_group == "No Insurance",
+        other_insurance  = relax$insurance_group == "Other Insurance",
+        adi_bin1         = relax$ADI_NATRANK_BIN == 1,
+        adi_bin2         = relax$ADI_NATRANK_BIN == 2,
+        adi_bin3         = relax$ADI_NATRANK_BIN == 3,
+        adi_bin4         = relax$ADI_NATRANK_BIN == 4
+      )
+
+      # Initialize
+      point_estimates <- list()
+      bootstrap <- list()
+      for (name in names(subgroup_conditions)) {
+        bootstrap[[name]] <- numeric(B)
+        subgroup_data <- relax[subgroup_conditions[[name]], ]
+        if (nrow(subgroup_data) >= 5) {
+          sdoh_cindex <- calculate_cindex(subgroup_data, event_col, sdoh_risk_col)
+          local_cindex <- calculate_cindex(subgroup_data, event_col, local_risk_col)
+          point_estimates[[name]] <- sdoh_cindex - local_cindex
+        } else {
+          point_estimates[[name]] <- NA
+        }
+      }
+
+      # Bootstrap loop
+      set.seed(123)
+      for (b_i in seq_len(B)) {
+        cat(sprintf("\rBootstrap iteration: %d/%d", b_i, B))
+        idx_b <- sample(seq_len(total_size), size = sample_size, replace = FALSE)
+        sample_data <- relax[idx_b, ]
+
+        for (name in names(subgroup_conditions)) {
+          subgroup_sample <- sample_data[subgroup_conditions[[name]][idx_b], ]
+          if (nrow(subgroup_sample) >= 5) {
+            sdoh_cindex <- calculate_cindex(subgroup_sample, event_col, sdoh_risk_col)
+            local_cindex <- calculate_cindex(subgroup_sample, event_col, local_risk_col)
+            bootstrap[[name]][b_i] <- sdoh_cindex - local_cindex
+          } else {
+            bootstrap[[name]][b_i] <- NA
+          }
+        }
+      }
+
+      cat("\nCalculating confidence intervals...\n")
+
+      # Compute summary stats
+      summary_list <- list()
+      for (name in names(point_estimates)) {
+        pe <- point_estimates[[name]]
+        boot_vals <- bootstrap[[name]]
+        se <- sd(boot_vals, na.rm = TRUE) * scaling_factor
+        lower <- pe - 1.96 * se
+        upper <- pe + 1.96 * se
+
+        summary_list[[name]] <- c(mean = pe, lower = lower, upper = upper)
+      }
+
+      # Format for export
+      summary_df <- as.data.frame(do.call(rbind, summary_list))
+      colnames(summary_df) <- c("mean", "lower95", "upper95")
+      rownames(summary_df) <- names(summary_list)
+
+      single_col <- sprintf("%.4f (%.4f ~ %.4f)",
+                            summary_df$mean,
+                            summary_df$lower95,
+                            summary_df$upper95)
+
+      final_df <- data.frame(
+        subgroup = rownames(summary_df),
+        `mean.lower95.upper95.` = single_col,
+        stringsAsFactors = FALSE
+      )
+
+      # Save to Excel
+      library(openxlsx)
+      filename <- paste0("results/", time_horizon, "y_diff_sdoh_local_", outcome, ".xlsx")
+      wb <- createWorkbook()
+      addWorksheet(wb, "Results")
+      writeData(wb, "Results", final_df)
+      saveWorkbook(wb, file = filename, overwrite = TRUE)
+
+      cat("\nResults saved to:", filename, "\n")
+    }
+  }
+
+  cat("\n Analysis completed. All files saved in the 'results' directory.\n")
+}
+
+# Run
+run_diff_bootstrap_analysis(relax)
+```
+

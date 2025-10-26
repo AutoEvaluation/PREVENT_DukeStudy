@@ -1,0 +1,377 @@
+
+
+## Load Lib
+
+```{r}
+library(fmsb)
+library(dplyr)
+```
+
+
+## C-Index across Models: Relax
+
+```{r}
+# file names
+files <- c("../discrimination/exp3/cindex_relax_5y_cvd.csv",
+           "../discrimination/exp3/cindex_relax_5y_ascvd.csv",
+           "../discrimination/exp3/cindex_relax_5y_hf.csv",
+           "../discrimination/exp3/cindex_relax_10y_cvd.csv",
+           "../discrimination/exp3/cindex_relax_10y_ascvd.csv",
+           "../discrimination/exp3/cindex_relax_10y_hf.csv")
+event_names <- c("Relax 5 Year CVD", "Relax 5 Year ASCVD", "Relax 5 Year HF",
+                 "Relax 8 Year CVD", "Relax 8 Year ASCVD", "Relax 8 Year HF")
+
+# Function to clean column names
+clean_colnames <- function(names) {
+  # First replace dots with spaces
+  names <- gsub("\\.", " ", names)
+  # Then apply specific replacements
+  names <- gsub("^Duke Local$", "Local Cox", names)
+  names <- gsub("^DNN$", "Local DNN", names)
+  return(names)
+}
+
+clean_model_names <- function(names) {
+  names <- gsub("^Duke Local$", "Local Cox", names)
+  names <- gsub("^DNN$", "Local DNN", names)
+  return(names)
+}
+
+# Pre-read all data to compute global min & max across files
+all_values <- c()
+dfs <- list()
+for(i in seq_along(files)) {
+  df <- read.csv(files[i], stringsAsFactors = FALSE)
+  df <- df[-(nrow(df) - 1), ]
+  
+  # Clean column names
+  colnames(df) <- clean_colnames(colnames(df))
+  
+  # Clean model names in the Model column
+  df$Model <- clean_model_names(df$Model)
+  
+  dfs[[i]] <- df
+  # Exclude the "Model" column to get numeric values
+  numeric_cols <- df[, -1]
+  all_values <- c(all_values, as.numeric(as.matrix(numeric_cols)))
+}
+
+# Compute global min and max (optionally rounded)
+global_min <- floor(min(all_values) * 1000) / 1000
+global_max <- ceiling(max(all_values) * 1000) / 1000
+
+# Loop through each data frame to create individual radar charts
+par(mfrow = c(1, 1), mar = c(5, 2, 2, 2))
+for(i in seq_along(dfs)) {
+  
+  df <- dfs[[i]]
+  # Identify numeric columns (first column is "Model")
+  all_axes <- colnames(df)[-1]
+  
+  # Prepare radar chart data with global scale
+  radar_data <- rbind(
+    rep(global_max, length(all_axes)),  # Row of global max values
+    rep(global_min, length(all_axes)),  # Row of global min values
+    df[, all_axes, drop = FALSE]        # Actual data
+  )
+  
+  # Name rows: "max", "min", then each model
+  rownames(radar_data) <- c("max", "min", df$Model)
+  # Column names are already cleaned from df
+  colnames(radar_data) <- all_axes
+  
+  # Create ring segments
+  seg_count <- 6
+  step <- (global_max - global_min) / seg_count
+  ring_labels <- round(seq(global_min, global_max, by = step), 3)
+  
+  # Define colors for each model
+  num_models <- nrow(df)
+  palette_colors <- c("#66C2A5", "#FFD92F", "#FC8D62",
+                      "#E78AC3", "#A6D854")
+  plot_colors <- palette_colors[seq_len(num_models)]
+  
+  # Plot the radar chart
+  plot_title <- paste(event_names[i], "across Models")
+  filename <- paste0("plots/", gsub(" ", "_", tolower(plot_title)), ".png")
+  # Open high-resolution PNG
+  png(filename, width = 3500, height = 2500, res = 500)
+  # Plot radar chart
+  radarchart(
+    radar_data,
+    axistype = 1,
+    plty = 2,
+    seg = seg_count,
+    caxislabels = ring_labels,
+    pcol = plot_colors,
+    pfcol = NA,
+    plwd = 2,
+    cglcol = "grey",
+    cglty = 1,
+    cglwd = 0.8,
+    axislabcol = "grey",
+    vlcex = 0.4
+  )
+  
+  # Title and legend
+  title(main = plot_title)
+  
+  par(xpd = TRUE)
+  legend(
+    "bottom",
+    inset = c(0, -0.1),
+    legend = df$Model,
+    col = plot_colors,
+    lty = 2,
+    lwd = 2,
+    cex = 0.3,
+    bty = "n",
+    horiz = TRUE
+  )
+  par(xpd = FALSE)
+  
+  # Close the device to save the file
+  dev.off()
+}
+```
+
+## C-Index across Models: Strict
+
+```{r}
+# file names
+files <- c("../discrimination/exp3/cindex_strict_5y_cvd.csv",
+           "../discrimination/exp3/cindex_strict_5y_ascvd.csv",
+           "../discrimination/exp3/cindex_strict_5y_hf.csv",
+           "../discrimination/exp3/cindex_strict_10y_cvd.csv",
+           "../discrimination/exp3/cindex_strict_10y_ascvd.csv",
+           "../discrimination/exp3/cindex_strict_10y_hf.csv")
+event_names <- c("Strict 5 Year CVD", "Strict 5 Year ASCVD", "Strict 5 Year HF",
+                 "Strict 8 Year CVD", "Strict 8 Year ASCVD", "Strict 8 Year HF")
+
+# ---------------------------
+# Pre-read all data to compute global min & max across files
+# ---------------------------
+all_values <- c()
+dfs <- list()
+
+for(i in seq_along(files)) {
+  df <- read.csv(files[i], stringsAsFactors = FALSE)
+  df <- df[-(nrow(df) - 1), ]
+  
+  # Clean column names
+  colnames(df) <- clean_colnames(colnames(df))
+  
+  # Clean model names in the Model column
+  df$Model <- clean_model_names(df$Model)
+  
+  dfs[[i]] <- df
+  # Exclude the "Model" column to get numeric values
+  numeric_cols <- df[, -1]
+  all_values <- c(all_values, as.numeric(as.matrix(numeric_cols)))
+}
+
+# Compute global min and max (optionally rounded)
+global_min <- floor(min(all_values) * 1000) / 1000
+global_max <- ceiling(max(all_values) * 1000) / 1000
+
+# ---------------------------
+# Loop through each data frame to create individual radar charts
+# ---------------------------
+# Increase bottom margin to accommodate the legend
+par(mfrow = c(1, 1), mar = c(5, 2, 2, 2))
+
+for(i in seq_along(dfs)) {
+  
+  df <- dfs[[i]]
+  # Identify numeric columns (first column is "Model")
+  all_axes <- colnames(df)[-1]
+  
+  # Prepare radar chart data with global scale
+  radar_data <- rbind(
+    rep(global_max, length(all_axes)),  # Row of global max values
+    rep(global_min, length(all_axes)),  # Row of global min values
+    df[, all_axes, drop = FALSE]        # Actual data
+  )
+  
+  # Name rows: "max", "min", then each model
+  rownames(radar_data) <- c("max", "min", df$Model)
+  # Clean up column names for readability
+  colnames(radar_data) <- gsub("\\.", " ", colnames(radar_data))
+  
+  # Create ring segments
+  seg_count <- 6
+  step <- (global_max - global_min) / seg_count
+  ring_labels <- round(seq(global_min, global_max, by = step), 3)
+  
+  # Define colors for each model
+  num_models <- nrow(df)
+  palette_colors <- c("#66C2A5", "#FFD92F", "#FC8D62",
+                      "#E78AC3", "#A6D854")
+  plot_colors <- palette_colors[seq_len(num_models)]
+  
+  # ---------------------------
+  # Plot the radar chart
+  # ---------------------------
+  # Construct filename: lowercase, spaces to underscores
+  plot_title <- paste(event_names[i], "across Models")
+  filename <- paste0("plots/", gsub(" ", "_", tolower(plot_title)), ".png")
+
+  # Open high-resolution PNG
+  png(filename, width = 3500, height = 2500, res = 500)
+  # Plot radar chart
+  radarchart(
+    radar_data,
+    axistype = 1,
+    plty = 2,
+    seg = seg_count,
+    caxislabels = ring_labels,
+    pcol = plot_colors,
+    pfcol = NA,
+    plwd = 2,
+    cglcol = "grey",
+    cglty = 1,
+    cglwd = 0.8,
+    axislabcol = "grey",
+    vlcex = 0.4
+  )
+  
+  # Title and legend
+  title(main = plot_title)
+  
+  par(xpd = TRUE)
+  legend(
+    "bottom",
+    inset = c(0, -0.1),
+    legend = df$Model,
+    col = plot_colors,
+    lty = 2,
+    lwd = 2,
+    cex = 0.3,
+    bty = "n",
+    horiz = TRUE
+  )
+  par(xpd = FALSE)
+  
+  # Close the device to save the file
+  dev.off()
+}
+```
+
+
+## C-Index across Cohorts
+
+```{r}
+# file names
+files <- c("../discrimination/results/cindex_prevent_5y_cvd_across_cohorts.csv",
+           "../discrimination/results/cindex_prevent_5y_ascvd_across_cohorts.csv",
+           "../discrimination/results/cindex_prevent_5y_hf_across_cohorts.csv",
+           "../discrimination/results/cindex_prevent_10y_cvd_across_cohorts.csv",
+           "../discrimination/results/cindex_prevent_10y_ascvd_across_cohorts.csv",
+           "../discrimination/results/cindex_prevent_10y_hf_across_cohorts.csv")
+event_names <- c("PREVENT 5 Year CVD", "PREVENT 5 Year ASCVD", "PREVENT 5 Year HF",
+                 "PREVENT 8 Year CVD", "PREVENT 8 Year ASCVD", "PREVENT 8 Year HF")
+
+# ---------------------------
+# Pre-read all data to compute global min & max across files
+# ---------------------------
+all_values <- c()
+dfs <- list()
+
+for(i in seq_along(files)) {
+  df <- read.csv(files[i], stringsAsFactors = FALSE)
+  
+  # Rename column names to replace "." with " "
+  colnames(df) <- gsub("\\.", " ", colnames(df))
+  
+  dfs[[i]] <- df
+  # Exclude the "Model" column to get numeric values
+  numeric_cols <- df[, -1]
+  all_values <- c(all_values, as.numeric(as.matrix(numeric_cols)))
+}
+
+# Compute global min and max (optionally rounded)
+global_min <- floor(min(all_values) * 1000) / 1000
+global_max <- ceiling(max(all_values) * 1000) / 1000
+
+# ---------------------------
+# Loop through each data frame to create individual radar charts
+# ---------------------------
+# Increase bottom margin to accommodate the legend
+par(mfrow = c(1, 1), mar = c(5, 2, 2, 2))
+
+for(i in seq_along(dfs)) {
+  
+  df <- dfs[[i]]
+  # Identify numeric columns (first column is "Model")
+  all_axes <- colnames(df)[-1]
+  
+  # Prepare radar chart data with global scale
+  radar_data <- rbind(
+    rep(global_max, length(all_axes)),  # Row of global max values
+    rep(global_min, length(all_axes)),  # Row of global min values
+    df[, all_axes, drop = FALSE]        # Actual data
+  )
+  
+  # Name rows: "max", "min", then each model
+  rownames(radar_data) <- c("max", "min", df$Cohort)
+  # Clean up column names for readability
+  colnames(radar_data) <- gsub("\\.", " ", colnames(radar_data))
+  
+  # Create ring segments
+  seg_count <- 6
+  step <- (global_max - global_min) / seg_count
+  ring_labels <- round(seq(global_min, global_max, by = step), 3)
+  
+  # Define colors for each model
+  num_models <- nrow(df)
+  palette_colors <- c("#66C2A5", "#FC8D62", "#8DA0CB",
+                      "#E78AC3", "#A6D854", "#FFD92F")
+  plot_colors <- palette_colors[seq_len(num_models)]
+  
+  # ---------------------------
+  # Plot the radar chart
+  # ---------------------------
+  # Construct filename: lowercase, spaces to underscores
+  plot_title <- paste(event_names[i], "across Cohorts")
+  filename <- paste0("plots/", gsub(" ", "_", tolower(plot_title)), ".png")
+
+  # Open high-resolution PNG
+  png(filename, width = 3500, height = 2500, res = 500)
+  # Plot radar chart
+  radarchart(
+    radar_data,
+    axistype = 1,
+    plty = 2,
+    seg = seg_count,
+    caxislabels = ring_labels,
+    pcol = plot_colors,
+    pfcol = NA,
+    plwd = 2,
+    cglcol = "grey",
+    cglty = 1,
+    cglwd = 0.8,
+    axislabcol = "grey",
+    vlcex = 0.4
+  )
+  
+  # Title and legend
+  title(main = plot_title)
+  
+  par(xpd = TRUE)
+  legend(
+    "bottom",
+    inset = c(0, -0.1),
+    legend = df$Cohort,
+    col = plot_colors,
+    lty = 2,
+    lwd = 2,
+    cex = 0.3,
+    bty = "n",
+    horiz = TRUE
+  )
+  par(xpd = FALSE)
+  
+  # Close the device to save the file
+  dev.off()
+}
+```

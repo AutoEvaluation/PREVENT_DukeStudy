@@ -1,0 +1,224 @@
+
+
+## Across Models
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(stringr)
+
+# Define custom color palette with the specified colors
+model_colors <- c(
+  "PREVENT" = "#66C2A5",
+  "Local Cox" = "#FC8D62"
+)
+
+# Define events, models, and time horizons
+events <- c("cvd", "ascvd", "hf")
+time_horizons <- c(5, 10)
+
+# Function to process data directly from Excel or CSV
+process_data_file <- function(file_path) {
+  # Check if file exists
+  if (!file.exists(file_path)) {
+    warning(paste("File not found:", file_path, "-- skipping."))
+    return(data.frame())
+  }
+  
+  # Determine if CSV or Excel and read accordingly
+  if (grepl("\\.csv$", file_path)) {
+    df <- read.csv(file_path)
+  } else if (grepl("\\.xlsx$", file_path)) {
+    df <- read_excel(file_path)
+  } else {
+    warning(paste("Unsupported file format:", file_path, "-- skipping."))
+    return(data.frame())
+  }
+  
+  # If the file is empty, return empty dataframe
+  if (nrow(df) == 0) {
+    warning(paste("File", file_path, "has 0 rows -- skipping."))
+    return(data.frame())
+  }
+  
+  # Create a long format data frame
+  long_df <- df %>%
+    pivot_longer(
+      cols = -Model,
+      names_to = "subgroup",
+      values_to = "value_with_ci"
+    )
+  
+  # Pattern to capture single value or value + CI
+  pattern <- "^\\s*([-0-9.]+)\\s*(?:\\(\\s*([-0-9.]+)\\s*~\\s*([-0-9.]+)\\s*\\))?\\s*$"
+  
+  long_df <- long_df %>%
+    mutate(
+      matches = str_match(value_with_ci, pattern),
+      mean_est = as.numeric(matches[, 2]),
+      lower = as.numeric(matches[, 3]),
+      upper = as.numeric(matches[, 4]),
+      model = case_when(
+        Model == "PREVENT" ~ "prevent",
+        Model == "Duke Local" ~ "local",
+        Model == "Duke Local(Race)" ~ "local_race",
+        TRUE ~ tolower(Model)
+      )
+    ) %>%
+    select(-matches)
+  
+  return(long_df)
+}
+
+# Function to format subgroups correctly
+format_subgroups <- function(df) {
+  # Trim any leading/trailing spaces from 'subgroup' just in case
+  df <- df %>%
+    mutate(subgroup = str_trim(subgroup, side = "both"))
+  
+  df <- df %>% 
+      filter(Model %in% c("PREVENT", "Duke Local"))
+  
+  # Format the display version of model and subgroup
+  df <- df %>%
+    mutate(
+      display_model = case_when(
+        model == "prevent" ~ "PREVENT",
+        model == "local" ~ "Local Cox"
+      ),
+      # Format subgroups as specified
+      formatted_subgroup = case_when(
+        subgroup == "Female" ~ "General Female",
+        subgroup == "Male" ~ "General Male",
+        subgroup == "White.Female" ~ "White Female",
+        subgroup == "White.Male" ~ "White Male",
+        subgroup == "Asian.Female" ~ "Asian Female",
+        subgroup == "Asian.Male" ~ "Asian Male",
+        subgroup == "Black.Female" ~ "Black Female",
+        subgroup == "Black.Male" ~ "Black Male",
+        subgroup == "ADI.BIN.1" ~ "ADI BIN1",
+        subgroup == "ADI.BIN.2" ~ "ADI BIN2",
+        subgroup == "ADI.BIN.3" ~ "ADI BIN3",
+        subgroup == "ADI.BIN.4" ~ "ADI BIN4",
+        subgroup == "Commercial" ~ "Commercial",
+        subgroup == "Medicaid" ~ "Medicaid",
+        subgroup == "Medicare" ~ "Medicare",
+        subgroup == "No.Insurance" ~ "No Insurance",
+        subgroup == "Other.Insurance" ~ "Other Insurance",
+        TRUE ~ subgroup
+      )
+    )
+  
+  # Define a desired subgroup order
+  subgroup_order <- c(
+    "General Male", "General Female", 
+    "Asian Male", "White Male", "Black Male",
+    "Asian Female", "White Female", "Black Female",
+    "ADI BIN1", "ADI BIN2", "ADI BIN3", "ADI BIN4",
+    "Commercial", "Medicaid", "Medicare", "No Insurance", "Other Insurance"
+  )
+  
+  # Make subgroup a factor with the specified order
+  df <- df %>%
+    mutate(formatted_subgroup = factor(formatted_subgroup, levels = subgroup_order))
+  
+  return(df)
+}
+
+# Process data for each time horizon and event
+for (time in time_horizons) {
+  for (e in events) {
+    # Construct the file path
+    file_path <- paste0("../discrimination/results/bootstrap_cindex_relax_", time, "y_", e, ".csv")
+    
+    # Process the data
+    all_data <- process_data_file(file_path)
+    
+    # Skip plotting if there's no valid data
+    if (nrow(all_data) == 0) {
+      warning(paste("No valid data for", time, "year", e))
+      next
+    }
+    
+    # Format the data
+    all_data <- format_subgroups(all_data)
+    
+    # Order display_model factor to put PREVENT first
+    all_data <- all_data %>%
+      mutate(display_model = factor(
+        display_model,
+        levels = c("PREVENT", "Local Cox")
+      ))
+    
+    # Dynamically determine y-limits based on actual data
+    # (The min is from lower or mean_est, the max from upper or mean_est)
+    y_min <- min(all_data$lower, all_data$mean_est, na.rm = TRUE)
+    y_max <- max(all_data$upper, all_data$mean_est, na.rm = TRUE)
+    
+    # Optionally pad them a bit so points/bars are not flush
+    y_min <- y_min - 0.01
+    y_max <- y_max + 0.01
+    
+    # If you must keep 0.65 as a floor:
+    # y_min <- min(0.65, y_min)
+    
+    # Adjust time display for plot title (change 10 to 8)
+    display_time <- ifelse(time == 10, 8, time)
+    
+    p <- ggplot(all_data, aes(x = formatted_subgroup, y = mean_est, color = display_model)) +
+      # Add grid lines
+      geom_hline(yintercept = seq(0.65, 0.85, by = 0.05), color = "gray90") +
+      geom_vline(xintercept = 1:length(unique(all_data$formatted_subgroup)), color = "gray90") +
+      
+      # Points
+      geom_point(position = position_dodge(width = 0.5), size = 2) +
+      
+      # Error bars only where lower & upper exist
+      geom_errorbar(
+        data = subset(all_data, !is.na(lower) & !is.na(upper)),
+        aes(ymin = lower, ymax = upper),
+        position = position_dodge(width = 0.5),
+        width = 0.3
+      ) +
+      
+      # Custom color scale
+      scale_color_manual(values = model_colors) +
+      
+      # Dynamic y-axis limits
+      scale_y_continuous(
+        limits = c(y_min, y_max),
+        breaks = seq(round(y_min, 2), round(y_max, 2), by = 0.05)
+      ) +
+      scale_x_discrete(expand = expansion(add = 1)) +
+      
+      labs(
+        title = paste(display_time, "-Year", toupper(e), "Comparison across Models"),
+        x = "Subgroup",
+        y = "C-Index (95% CI)",
+        color = "Model"
+      ) +
+      
+      theme_minimal(base_size = 12) +
+      theme(
+        plot.title = element_text(size = 16, hjust = 0.5),
+        axis.text.x = element_text(angle = 35, hjust = 1, vjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = "top",
+        legend.box = "horizontal",
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 11),
+        panel.spacing = unit(2, "lines"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "gray90", fill = NA),
+        plot.margin = margin(10, 30, 10, 10)
+      )
+    
+    out_file <- paste0('plots/', time, "y_", e, "_bootstrap_cindex.png")
+    png(filename = out_file, width = 3500, height = 2500, res = 500)
+    print(p)
+    dev.off()
+    print(p)
+  }
+}
+```

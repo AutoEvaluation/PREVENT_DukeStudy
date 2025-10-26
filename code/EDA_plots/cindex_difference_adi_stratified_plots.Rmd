@@ -1,0 +1,190 @@
+
+## Define library path where R looks for installed packages and load them
+
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("survcomp", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+memory.limit(size=100000000)
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc) # for c-index
+library(survival)
+library(caret)  # for creating folds
+library(openxlsx)
+library(readxl)
+library(tidyverse)
+library(stringr)
+library(patchwork)
+library(gridExtra)
+```
+
+## Stratify by ADI BIN
+
+```{r}
+# Define events
+events <- c("cvd", "ascvd", "hf")
+years <- c('5', '10')
+
+# Step 1: Extract all possible subgroup_clean values across events
+all_subgroups <- c()
+
+for (event in events) {
+  for (time_horizon in years){
+    file_name <- paste0("../discrimination/results/", time_horizon, "y_adi_stratified_prevent_bootstrap_", event, ".xlsx")
+    
+    if (!file.exists(file_name)) {
+  message("Missing: ", file_name)
+  next
+}
+    
+    df_tmp <- read_excel(file_name)
+    
+    df_tmp <- df_tmp %>%
+      mutate(label_no_bin = str_replace(subgroup, "^bin\\d+_", "")) %>%
+      mutate(label_no_bin = if_else(str_detect(subgroup, "diff"), str_replace(label_no_bin, "^diff_", ""), label_no_bin)) %>%
+      mutate(
+        subgroup_clean = case_when(
+          label_no_bin == "asian_FM"            ~ "Asian: Female - Male",
+          label_no_bin == "black_FM"            ~ "Black: Female - Male",
+          label_no_bin == "white_FM"            ~ "White: Female - Male",
+          label_no_bin == "female_male"         ~ "Female - Male",
+          label_no_bin == "female_asian_black"  ~ "Female: Asian - Black",
+          label_no_bin == "female_asian_white"  ~ "Female: Asian - White",
+          label_no_bin == "female_white_black"  ~ "Female: White - Black",
+          label_no_bin == "male_asian_black"    ~ "Male: Asian - Black",
+          label_no_bin == "male_asian_white"    ~ "Male: Asian - White",
+          label_no_bin == "male_white_black"    ~ "Male: White - Black",
+          TRUE ~ str_to_title(str_replace_all(label_no_bin, "_", " "))  # Title case for non-diff
+        )
+      )
+    
+    all_subgroups <- unique(c(all_subgroups, df_tmp$subgroup_clean))
+  }
+  
+  # Step 2: Loop over events and ensure order consistency
+  for (event in events) {
+    for (time_horizon in years) {
+      file_name <- paste0("../discrimination/results/", time_horizon, "y_adi_stratified_prevent_bootstrap_", event, ".xlsx")
+      
+      if (!file.exists(file_name)) {
+        warning(paste("File not found:", file_name, "-- skipping."))
+        next
+      }
+      
+      df <- read_excel(file_name)
+    
+      # Parse mean and CI
+      matches <- str_match(df$mean..lower95.upper95., "^\\s*([-0-9.]+)\\s*\\(\\s*([-0-9.]+)\\s*~\\s*([-0-9.]+)\\s*\\)\\s*$")
+    
+      df <- df %>%
+        mutate(
+          mean_est = as.numeric(matches[, 2]),
+          lower    = as.numeric(matches[, 3]),
+          upper    = as.numeric(matches[, 4]),
+          bin      = str_to_upper(str_extract(subgroup, "^bin\\d+")),  # Convert bin labels to uppercase
+          type     = if_else(str_detect(subgroup, "diff"), "diff", "non_diff")
+        )
+    
+      # Clean labels
+      df <- df %>%
+        mutate(label_no_bin = str_replace(subgroup, "^bin\\d+_", "")) %>%
+        mutate(label_no_bin = if_else(type == "diff", str_replace(label_no_bin, "^diff_", ""), label_no_bin)) %>%
+        mutate(
+          subgroup_clean = case_when(
+            label_no_bin == "asian_FM"            ~ "Asian: Female - Male",
+            label_no_bin == "black_FM"            ~ "Black: Female - Male",
+            label_no_bin == "white_FM"            ~ "White: Female - Male",
+            label_no_bin == "female_male"         ~ "Female - Male",
+            label_no_bin == "female_asian_black"  ~ "Female: Asian - Black",
+            label_no_bin == "female_asian_white"  ~ "Female: Asian - White",
+            label_no_bin == "female_white_black"  ~ "Female: White - Black",
+            label_no_bin == "male_asian_black"    ~ "Male: Asian - Black",
+            label_no_bin == "male_asian_white"    ~ "Male: Asian - White",
+            label_no_bin == "male_white_black"    ~ "Male: White - Black",
+            TRUE ~ str_to_title(str_replace_all(label_no_bin, "_", " "))
+          )
+        )
+    
+      # Ensure subgroup_clean has a consistent order across events
+      df <- df %>%
+        mutate(subgroup_clean = factor(subgroup_clean, levels = all_subgroups))
+    
+      # Compute x-axis limits
+      x_limits_diff <- range(df %>% filter(type == "diff") %>% select(lower, upper), na.rm = TRUE)
+      x_limits_non_diff <- range(df %>% filter(type == "non_diff") %>% select(lower, upper), na.rm = TRUE)
+    
+      # Generate "diff" Plots and Store Them in a List
+      diff_plots <- list()
+      bins <- unique(df$bin)
+      plot_idx <- 1
+    
+      for (b in bins) {
+        df_bin_diff <- df %>% filter(bin == b, type == "diff")
+        
+        if (nrow(df_bin_diff) > 0) {
+          bin_number <- str_extract(b, "\\d+")
+    
+          p_diff <- ggplot(df_bin_diff, aes(x = subgroup_clean, y = mean_est)) +
+            geom_point(color = "blue") +
+            geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "blue") +
+            geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+            coord_flip() +
+            scale_y_continuous(limits = x_limits_diff) +
+            labs(title = paste("BIN", bin_number), x = "Subgroup", y = "") +
+            theme_minimal() +
+            theme(plot.title = element_text(hjust = 0.5))
+    
+          diff_plots[[plot_idx]] <- p_diff
+          plot_idx <- plot_idx + 1
+        }
+      }
+    
+      # Arrange "diff" Plots in a 2x2 Grid
+      if (length(diff_plots) > 0) {
+        diff_grid <- wrap_plots(diff_plots, ncol = 2, nrow = 2)
+        print(diff_grid)
+        png(paste0("plots/cindex_diff_grid_", time_horizon, "y_", event, ".png"),
+            width = 12 * 300, height = 10 * 300, res = 300)
+        print(diff_grid)
+        dev.off()
+      }
+    
+      # Plot "non_diff" Subgroups with Consistent Label Order
+      df_non_diff <- df %>% filter(type == "non_diff")
+    
+      if (nrow(df_non_diff) > 0) {
+        p_non_diff <- ggplot(df_non_diff, aes(x = subgroup_clean, y = mean_est, color = bin)) +
+          geom_point(position = position_dodge(width = 0.6)) +
+          geom_errorbar(aes(ymin = lower, ymax = upper), position = position_dodge(width = 0.6), width = 0.3) +
+          scale_color_manual(values = c("BIN1" = "#E69F00", "BIN2" = "#56B4E9", "BIN3" = "#009E73", "BIN4" = "#CC79A7")) +
+          labs(
+            title = paste("C-Index (95% CI) for", toupper(event), "across BINs"),
+            x = "Subgroup",
+            y = "C-Index (95% CI)",
+            color = "BIN"
+          ) +
+          theme_light(base_size = 14) +
+          theme(
+            plot.title  = element_text(size = 16, hjust = 0.5),
+            axis.text.x = element_text(angle = 35, hjust = 1, vjust = 1, size = 12),
+            axis.text.y = element_text(size = 12),
+            legend.position = "top",
+            legend.text = element_text(size = 12),
+            legend.title = element_text(size = 13, face = "bold")
+          )
+        print(p_non_diff)
+        png(paste0("plots/cindex_non_diff_", time_horizon, "y_", event, ".png"),
+            width = 12 * 300, height = 10 * 300, res = 300)
+        print(p_non_diff)
+        dev.off()
+      }}
+  }}
+```
+
+

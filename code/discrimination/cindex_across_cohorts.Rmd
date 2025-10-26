@@ -1,0 +1,38 @@
+
+## PREVENT across Cohorts
+
+```{r}
+# Define year-event combinations
+combos <- c("5y_cvd", "5y_ascvd", "5y_hf", "10y_cvd", "10y_ascvd", "10y_hf")
+
+# Loop through each year-event combination
+for (combo in combos) {
+  # Construct file paths
+  file_relax <- paste0("results/cindex_relax_", combo, ".csv")
+  file_strict <- paste0("results/cindex_strict_", combo, ".csv")
+  
+  # Read both CSVs
+  df_relax <- read.csv(file_relax, stringsAsFactors = FALSE)
+  df_strict <- read.csv(file_strict, stringsAsFactors = FALSE)
+  
+  # Extract only the PREVENT row
+  row_relax <- df_relax[df_relax$Model == "PREVENT", ]
+  row_strict <- df_strict[df_strict$Model == "PREVENT", ]
+  
+  # Modify the label column from Model to Cohort
+  row_relax$Model <- "Cohort Relax"
+  row_strict$Model <- "Cohort Strict"
+  
+  # Combine and rename the label column
+  combined_df <- rbind(row_strict, row_relax)
+  names(combined_df)[1] <- "Cohort"
+  
+  # Construct output filename
+  output_file <- paste0("results/cindex_prevent_", combo, "_across_cohorts.csv")
+  
+  # Write to CSV
+  write.csv(combined_df, output_file, row.names = FALSE)
+  
+  cat("Saved:", output_file, "\n")
+}
+```

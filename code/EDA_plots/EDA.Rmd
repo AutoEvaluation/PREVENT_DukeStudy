@@ -1,0 +1,302 @@
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc)
+library(caret)
+```
+
+## Load Data
+
+```{r}
+strict = fread('../../data/strict_cohort2/all_data.csv')
+relax = fread('../../data/relax_cohort2/cleaned_data.csv')
+
+# replace extreme values
+relax <- relax %>% mutate(age = pmin(age, 125),
+                        sbp = pmin(pmax(sbp, 90), 200),
+                        tc = pmin(pmax(tc, 130), 320),
+                        hdlc = pmin(pmax(hdlc, 20), 100),
+                        bmi = pmin(pmax(bmi, 18.5), 40))
+
+# insurance
+relax$insurance_group <- with(relax,
+  ifelse(is.na(insurance_type), NA,
+    ifelse(insurance_type %in% c("COMMERCIAL", "MANAGED CARE", "NC BLUE CROSS", "OOS BLUE CROSS"),
+           "Commercial",
+    ifelse(insurance_type %in% c("MEDICARE", "MEDICARE ADVANTAGE"),
+           "Medicare",
+    ifelse(insurance_type %in% c("MEDICAID PENDING", "NC MEDICAID", "OOS MEDICAID"),
+           "Medicaid",
+    ifelse(insurance_type == "SELF-PAY",
+           "No Insurance",
+           "Other Insurance"))))))
+
+# split SDOH into quartiles
+relax <- relax %>%
+  mutate(
+    ADI_NATRANK_BIN = cut(
+      ADI_NATRANK,
+      breaks = seq(0, 100, by = 25),
+      labels = 1:4,
+      include.lowest = TRUE))
+
+relax$ascvd <- 1*((relax$stroke+relax$mi)>0)
+
+# rename
+setnames(strict,
+         old = c("ascvd_10y", "cvd_10y", "hf_10y"),
+         new = c("ascvd", "cvd", "hf"))
+
+# transform back
+strict$age <- strict$age * 10 + 55
+strict$hdlc <- ((strict$hdlc * 0.3) + 1.3) / 0.02586
+```
+
+## Cohort Characteristics
+
+```{r}
+# Helpers
+mean_sd <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  sprintf("%.1f ± %.1f", m, s)
+}
+
+percent_true <- function(x) {
+  p <- mean(x == 1)
+  sprintf("%.1f%%", 100 * p)
+}
+
+percent_table <- function(x) {
+  tbl <- prop.table(table(x, useNA = "ifany")) * 100
+  return(round(tbl, 1))
+}
+
+# variable groups
+continuous_vars <- c("age", "sbp", "hdlc", "tc", "bmi", "eGFR", "followup_years")
+binary_vars <- c("diabetes", "smoker", "statin", "antihnt", "cvd", "ascvd", "hf", "death")
+categorical_vars <- c("race", "ADI_NATRANK_BIN", "insurance_group")
+# Function to summarize
+summarize_dataset <- function(df, name) {
+  cat("\n====== Dataset:", name, "======\n")
+  cat("Total patients:", nrow(df), "\n\n")
+  
+  for (sex_val in c(0, 1)) {
+    gender <- ifelse(sex_val == 1, "Female", "Male")
+    df_sex <- df[sex == sex_val]
+    cat("----", gender, "(n =", nrow(df_sex), ") ----\n")
+    
+    # Continuous variables
+    for (v in continuous_vars) {
+      cat(v, ":", mean_sd(df_sex[[v]]), "\n")
+    }
+    
+    cat("\nCategorical variables (%):\n")
+    for (v in categorical_vars) {
+      cat("Distribution of", v, ":\n")
+      print(percent_table(df_sex[[v]]))
+      cat("\n")
+    }
+    
+    cat("Binary outcomes (% with value == 1):\n")
+    for (v in binary_vars) {
+      cat(v, ":", percent_true(df_sex[[v]]), "\n")
+    }
+    cat("\n")
+  }
+}
+
+# Ensure data.table
+setDT(strict)
+setDT(relax)
+
+
+# Run summaries
+summarize_dataset(strict, "Strict Cohort")
+summarize_dataset(relax, "Relax Cohort")
+```
+
+
+```{r}
+check_custom_missingness_by_sex <- function(df, name = "Data") {
+  cat("\n====== Missingness Report (by Sex):", name, "======\n")
+  
+  # Variables you care about
+  vars_to_check <- c("ADI_NATRANK_BIN", "insurance_group", "sbp", "tc", "hdlc", "bmi", "eGFR")
+  
+  for (sex_val in c(0, 1)) {
+    sex_label <- ifelse(sex_val == 0, "Male", "Female")
+    df_sex <- df[sex == sex_val]
+    n <- nrow(df_sex)
+    
+    miss_percent <- sapply(df_sex[, ..vars_to_check], function(x) {
+      round(mean(is.na(x)) * 100, 1)
+    })
+    
+    report <- data.table(
+      Variable = vars_to_check,
+      Missing_Percent = miss_percent
+    )
+    
+    cat("\n---", sex_label, "(n =", n, ") ---\n")
+    print(report)
+  }
+}
+
+check_custom_missingness_by_sex(strict, "Strict Cohort")
+check_custom_missingness_by_sex(relax, "Relax Cohort")
+```
+
+
+## Univariate Analysis
+
+
+```{r}
+# Load library
+library(tableone)
+
+# Your dataset
+dt <- relax
+
+# Define variables to include in table
+vars <- c("age", "sbp", "tc", "hdlc", "bmi", "eGFR", "followup_years",
+          "sex", "race", "ADI_NATRANK_BIN", "insurance_group",
+          "diabetes", "smoker", "antihtn", "statin", "cvd", "ascvd", "hf", "death")
+
+# These are all treated as categorical in the table
+factorVars <- c("sex", "race", "ADI_NATRANK_BIN", "insurance_group",
+                "diabetes", "smoker", "antihtn", "statin", "cvd", "ascvd", "hf", "death")
+
+# Run univariate descriptive tables stratified by cvd, ascvd, and hf
+table_cvd   <- CreateTableOne(vars = vars, strata = "cvd", data = dt, factorVars = factorVars)
+table_ascvd <- CreateTableOne(vars = vars, strata = "ascvd", data = dt, factorVars = factorVars)
+table_hf    <- CreateTableOne(vars = vars, strata = "hf", data = dt, factorVars = factorVars)
+
+# Print tables with p-values
+cat("\n====== Table stratified by CVD ======\n")
+table_cvd
+
+cat("\n====== Table stratified by ASCVD ======\n")
+table_ascvd
+
+cat("\n====== Table stratified by HF ======\n")
+table_hf
+```
+
+
+
+## KM Plots
+
+```{r}
+library(survival)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(broom)
+
+relax = fread('../../data/relax_cohort2/transformed_data2.csv')
+setDT(relax)
+
+# Define settings
+time_col <- "followup_years"
+event_cols <- c("cvd_10y", "ascvd_10y", "hf_10y")
+group_vars <- c("race", "sex", "ADI_NATRANK_BIN", "insurance_group")
+title_mapping <- c(
+  "race" = "Race",
+  "sex" = "Sex",
+  "ADI_NATRANK_BIN" = "ADI Quartile",
+  "insurance_group" = "Insurance Group"
+)
+
+y_upper_limit <- 0.2
+
+for (event_col in event_cols) {
+  plot_list <- list()
+  
+  for (group_var in group_vars) {
+    
+    df <- relax[!is.na(get(time_col)) & !is.na(get(event_col)) & !is.na(get(group_var))]
+    df[[group_var]] <- as.factor(df[[group_var]])
+    
+    surv_obj <- Surv(df[[time_col]], df[[event_col]])
+    fit <- survfit(surv_obj ~ df[[group_var]])
+    
+    tidy_surv <- tidy(fit)
+    tidy_surv$group <- gsub(".*=", "", tidy_surv$strata)
+    
+    tidy_surv$cuminc <- 1 - tidy_surv$estimate
+    tidy_surv$lower_ci <- 1 - tidy_surv$conf.high
+    tidy_surv$upper_ci <- 1 - tidy_surv$conf.low
+    
+    # Custom legend labels for sex
+    if (group_var == "sex") {
+      tidy_surv$group <- ifelse(tidy_surv$group == "0", "0", "1")
+      legend_labels <- c("1" = "Female", "0" = "Male")
+    } else {
+      legend_labels <- NULL
+    }
+    
+    p <- ggplot(tidy_surv, aes(x = time, y = cuminc, color = group, fill = group)) +
+      geom_line(size = 1) +
+      geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.1, color = NA) +
+      labs(
+        title = title_mapping[group_var],
+        x = "Follow up (years)",
+        y = "Cumulative incidence"
+      ) +
+      scale_y_continuous(limits = c(0, y_upper_limit),
+                         breaks = seq(0, y_upper_limit, by = 0.05)) +
+      theme_minimal(base_size = 9) +
+      theme(
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10),
+        legend.position = "top",
+        legend.key.width = unit(0.25, "cm"),
+        legend.text = element_text(size = 6),
+        legend.title = element_blank(),
+        legend.margin = margin(0, 0, 0, 0),
+        legend.spacing.x = unit(0.2, "cm"),
+        axis.title = element_text(size = 8),
+        panel.grid.minor = element_blank()
+      ) +
+      guides(
+        color = guide_legend(override.aes = list(size = 2)),
+        fill = guide_legend(override.aes = list(size = 2))
+      )
+    
+    if (group_var == "sex") {
+      p <- p + scale_color_discrete(labels = legend_labels) +
+               scale_fill_discrete(labels = legend_labels)
+    }
+    
+    plot_list[[group_var]] <- p
+  }
+  
+  # Combine plots and optionally save or print
+  combined_plot <- plot_grid(plotlist = plot_list, ncol = 2, align = "hv", labels = NULL)
+  
+  # Save the plot
+  plot_title <- paste("Cumulative Incidence", toupper(event_col), "by Demographics")
+  filename <- paste0("plots/", gsub(" ", "_", tolower(plot_title)), ".png")
+  
+  # Open high-resolution PNG
+  png(filename, width = 3500, height = 2500, res = 500)
+  print(combined_plot)
+  # Close the device to save the file
+  dev.off()
+  
+  # Print to viewer
+  print(combined_plot)
+}
+```
+
+
+

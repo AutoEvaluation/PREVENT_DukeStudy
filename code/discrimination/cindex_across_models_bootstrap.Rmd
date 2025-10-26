@@ -1,0 +1,198 @@
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(survival)
+library(survAUC)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(data.table)
+library(Hmisc)
+```
+
+
+## Load Relax Data
+
+```{r}
+# load
+relax = fread('../../data/relax_cohort2/all_data2.csv')
+```
+
+
+```{r}
+# Function to calculate c-index for a specific subgroup
+calculate_cindex <- function(data, model, event, time_horizon) {
+  # Construct column names based on time horizon
+  risk_col  <- paste0(time_horizon, "y_", model, "_", event)
+  event_col <- paste0(event, "_", time_horizon, "y")
+  
+  # Extract data
+  risk_scores <- data[[risk_col]]
+  event_status <- data[[event_col]]
+  
+  # Compute C-index using rcorr.cens
+  c_index_result <- rcorr.cens(risk_scores, event_status)["C Index"]
+  
+  return(as.numeric(c_index_result))
+}
+
+# Function to calculate bootstrap standard errors and confidence intervals
+bootstrap_cindex <- function(relax_data, output_dir = "results") {
+  # Define parameters (same as in original code)
+  models <- c("prevent", "local", "race", "sdoh")
+  model_names <- c("PREVENT", "Duke Local", "Duke Local(Race)", "Duke Local(Race&SDOH)")
+  events <- c("cvd", "ascvd", "hf")
+  time_horizons <- c("5", "10")
+  
+  # Total iterations for progress tracking
+  total_iterations <- length(events) * length(time_horizons)
+  current_iteration <- 0
+    # Bootstrap parameters
+  n_bootstrap <- 100
+  full_sample_size <- 406230
+  bootstrap_sample_size <- 127151
+  
+  # Column categories based on the example file
+  categories <- c(
+    "Female", "Male", 
+    "White.Female", "White.Male", "Asian.Female", "Asian.Male", "Black.Female", "Black.Male",
+    "ADI.BIN.1", "ADI.BIN.2", "ADI.BIN.3", "ADI.BIN.4",
+    "Commercial", "Medicaid", "Medicare", "No.Insurance", "Other.Insurance"
+  )
+  cols_per_model <- length(categories)  # Should be 17
+   # Loop through each event and time horizon
+  for (event in events) {
+    for (time_horizon in time_horizons) {
+      # Read the original results file
+      filename <- paste0("results/cindex_relax_", time_horizon, "y_", event, ".csv")
+      cat(sprintf("Processing: %s\n", filename))
+      
+      # Check if file exists before proceeding
+      if (!file.exists(filename)) {
+        cat(sprintf("File not found: %s, skipping...\n", filename))
+        next
+      }
+      
+      # Read the original results
+      original_results <- read.csv(filename, stringsAsFactors = FALSE)
+      # Create a dataframe to store bootstrap results
+      bootstrap_results <- original_results
+      
+      bootstrap_samples <- array(NA, dim = c(length(models), cols_per_model, n_bootstrap))
+      
+      # Perform bootstrap
+      for (b in 1:n_bootstrap) {
+        if (b %% 10 == 0) {
+          cat(sprintf("Bootstrap iteration: %d/%d\n", b, n_bootstrap))
+        }
+        
+        # Create bootstrap sample (m out of n bootstrap)
+        bootstrap_indices <- sample(1:full_sample_size, size = bootstrap_sample_size, replace = FALSE)
+        bootstrap_data <- relax_data[bootstrap_indices, ]
+        
+        # Pre-compute subsets of bootstrap data
+        # Sex groups
+        female_data <- bootstrap_data[bootstrap_data$sex == 1, ]
+        male_data <- bootstrap_data[bootstrap_data$sex == 0, ]
+        
+        # Race-sex combinations
+        white_female_data <- bootstrap_data[bootstrap_data$race == 'White' & bootstrap_data$sex == 1, ]
+        white_male_data <- bootstrap_data[bootstrap_data$race == 'White' & bootstrap_data$sex == 0, ]
+        asian_female_data <- bootstrap_data[bootstrap_data$race == 'Asian' & bootstrap_data$sex == 1, ]
+        asian_male_data <- bootstrap_data[bootstrap_data$race == 'Asian' & bootstrap_data$sex == 0, ]
+        black_female_data <- bootstrap_data[bootstrap_data$race == 'Black' & bootstrap_data$sex == 1, ]
+        black_male_data <- bootstrap_data[bootstrap_data$race == 'Black' & bootstrap_data$sex == 0, ]
+        
+        # ADI bin data
+        adi_bin_data <- list()
+        for (bin in 1:4) {
+          adi_bin_data[[bin]] <- bootstrap_data[bootstrap_data$ADI_NATRANK_BIN == bin, ]
+        }
+        
+        # Insurance group data
+        insurance_groups <- c("Commercial", "Medicaid", "Medicare", "No Insurance", "Other Insurance")
+        insurance_data <- list()
+        for (i in 1:length(insurance_groups)) {
+          insurance_data[[i]] <- bootstrap_data[bootstrap_data$insurance_group == insurance_groups[i], ]
+        }
+        
+        # For each model, calculate c-indices for all subgroups
+        for (i in 1:length(models)) {
+          model <- models[i]
+          
+          # Category 1-2: Sex groups
+          bootstrap_samples[i, 1, b] <- calculate_cindex(female_data, model, event, time_horizon)
+          bootstrap_samples[i, 2, b] <- calculate_cindex(male_data, model, event, time_horizon)
+          
+          # Category 3-8: Race-sex combinations
+          bootstrap_samples[i, 3, b] <- calculate_cindex(white_female_data, model, event, time_horizon)
+          bootstrap_samples[i, 4, b] <- calculate_cindex(white_male_data, model, event, time_horizon)
+          bootstrap_samples[i, 5, b] <- calculate_cindex(asian_female_data, model, event, time_horizon)
+          bootstrap_samples[i, 6, b] <- calculate_cindex(asian_male_data, model, event, time_horizon)
+          bootstrap_samples[i, 7, b] <- calculate_cindex(black_female_data, model, event, time_horizon)
+          bootstrap_samples[i, 8, b] <- calculate_cindex(black_male_data, model, event, time_horizon)
+          
+          # Category 9-12: ADI bins
+          for (bin in 1:4) {
+            bootstrap_samples[i, 8 + bin, b] <- calculate_cindex(adi_bin_data[[bin]], model, event, time_horizon)
+          }
+          
+          # Category 13-17: Insurance groups
+          for (j in 1:length(insurance_groups)) {
+            bootstrap_samples[i, 12 + j, b] <- calculate_cindex(insurance_data[[j]], model, event, time_horizon)
+          }
+        }
+      }
+      
+      # Calculate standard errors and confidence intervals
+      for (i in 1:length(models)) {
+        for (j in 1:cols_per_model) {
+          # Get the column index in the results dataframe
+          col_idx <- 1 + j  # +1 because first column is "Model"
+          
+          # Get bootstrap samples for this model and category
+          samples <- na.omit(bootstrap_samples[i, j, ])
+          
+          if (length(samples) > 0) {
+            # Calculate standard error
+            se_m <- sd(samples)
+            se <- se_m * sqrt(bootstrap_sample_size / (full_sample_size - bootstrap_sample_size))
+
+            # Get original point estimate
+            point_estimate <- as.numeric(original_results[i, col_idx])
+            
+            # Calculate 95% confidence interval
+            lower_ci <- point_estimate - 1.96 * se
+            upper_ci <- point_estimate + 1.96 * se
+            
+            # Format as "point_estimate (lower~upper)" and store in results
+            bootstrap_results[i, col_idx] <- sprintf("%.4f (%.4f~%.4f)", 
+                                                   point_estimate, 
+                                                   lower_ci, 
+                                                   upper_ci)
+          } else {
+            bootstrap_results[i, col_idx] <- "NA (NA~NA)"
+          }
+        }
+      }
+      # Save to CSV
+      output_filename <- paste0(output_dir, "/bootstrap_cindex_relax_", time_horizon, "y_", event, ".csv")
+      write.csv(bootstrap_results, output_filename, row.names = FALSE)
+      cat(sprintf("Saved: %s\n", output_filename))
+      
+      # Update progress
+      current_iteration <- current_iteration + 1
+      cat(sprintf("\rProgress: %d/%d (%d%%)\n", 
+                 current_iteration, 
+                 total_iterations,
+                 round(current_iteration/total_iterations*100)))
+    }
+  }
+  
+  cat("\nBootstrap analysis completed. All files saved in the 'results' directory.\n")
+}
+
+bootstrap_cindex(relax)
+```

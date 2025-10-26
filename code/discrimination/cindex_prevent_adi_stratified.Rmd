@@ -1,0 +1,415 @@
+
+
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(survival)
+library(survAUC)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(data.table)
+library(Hmisc)
+```
+
+## Load Relax Data
+
+```{r}
+# load
+relax = fread('../../data/relax_cohort2/all_data2.csv')
+```
+
+
+## PREVENT Stratified by ADI BIN
+
+```{r}
+# Function to calculate c-index
+calculate_cindex <- function(data, event_col, risk_col) {
+  c_index_result <- rcorr.cens(data[[risk_col]], data[[event_col]])["C Index"]
+  return(as.numeric(c_index_result))
+}
+
+# Main analysis function
+run_bootstrap_analysis <- function(relax) {
+  # Define parameters
+  events <- c("cvd", "ascvd", "hf")
+  time_horizons <- c("5", "10")
+  model <- "prevent"
+  B <- 100
+  
+  # Set sample size for bootstrap
+  total_size <- nrow(relax)
+  sample_size <- 127151
+  scaling_factor <- sqrt(sample_size/(total_size - sample_size))  # For scaling SE
+  
+  # Process for each time horizon and event
+  for (time_horizon in time_horizons) {
+    for (outcome in events) {
+      cat(sprintf("\nResults for %s (%s year)\n", outcome, time_horizon))
+      
+      # Construct column names based on time horizon and outcome
+      risk_col <- paste0(time_horizon, "y_", model, "_", outcome)
+      event_col <- paste0(outcome, "_", time_horizon, "y")
+      
+      # First calculate point estimates using all data
+      point_estimates <- list()
+      
+      # Loop through ADI bins for point estimates
+      for (bin_val in c(1, 2, 3, 4)) {
+        bin_data <- relax[relax$ADI_NATRANK_BIN == bin_val, ]
+        bin_str <- paste0("bin", bin_val, "_")
+        
+        # By sex
+        female_bin_data <- bin_data[bin_data$sex == 1, ]
+        male_bin_data <- bin_data[bin_data$sex == 0, ]
+        
+        # Calculate c-index for sex groups
+        if (nrow(female_bin_data) >= 5) {
+          point_estimates[[paste0(bin_str, "general_female")]] <- 
+            calculate_cindex(female_bin_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "general_female")]] <- NA
+        }
+        
+        if (nrow(male_bin_data) >= 5) {
+          point_estimates[[paste0(bin_str, "general_male")]] <- 
+            calculate_cindex(male_bin_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "general_male")]] <- NA
+        }
+        
+        # Calculate sex difference
+        if (!is.na(point_estimates[[paste0(bin_str, "general_female")]]) && 
+            !is.na(point_estimates[[paste0(bin_str, "general_male")]])) {
+          point_estimates[[paste0(bin_str, "diff_female_male")]] <- 
+            point_estimates[[paste0(bin_str, "general_female")]] - 
+            point_estimates[[paste0(bin_str, "general_male")]]
+        } else {
+          point_estimates[[paste0(bin_str, "diff_female_male")]] <- NA
+        }
+        
+        # Race-sex subgroups
+        # Female
+        asian_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "Asian", ]
+        white_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "White", ]
+        black_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "Black", ]
+        
+        # Calculate c-indices for female race subgroups
+        if (nrow(asian_female_data) >= 5) {
+          point_estimates[[paste0(bin_str, "asian_female")]] <- 
+            calculate_cindex(asian_female_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "asian_female")]] <- NA
+        }
+        
+        if (nrow(white_female_data) >= 5) {
+          point_estimates[[paste0(bin_str, "white_female")]] <- 
+            calculate_cindex(white_female_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "white_female")]] <- NA
+        }
+        
+        if (nrow(black_female_data) >= 5) {
+          point_estimates[[paste0(bin_str, "black_female")]] <- 
+            calculate_cindex(black_female_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "black_female")]] <- NA
+        }
+        
+        # Male
+        asian_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "Asian", ]
+        white_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "White", ]
+        black_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "Black", ]
+        
+        # Calculate c-indices for male race subgroups
+        if (nrow(asian_male_data) >= 5) {
+          point_estimates[[paste0(bin_str, "asian_male")]] <- 
+            calculate_cindex(asian_male_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "asian_male")]] <- NA
+        }
+        
+        if (nrow(white_male_data) >= 5) {
+          point_estimates[[paste0(bin_str, "white_male")]] <- 
+            calculate_cindex(white_male_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "white_male")]] <- NA
+        }
+        
+        if (nrow(black_male_data) >= 5) {
+          point_estimates[[paste0(bin_str, "black_male")]] <- 
+            calculate_cindex(black_male_data, event_col, risk_col)
+        } else {
+          point_estimates[[paste0(bin_str, "black_male")]] <- NA
+        }
+        
+        # Calculate pairwise differences
+        # Same race, different sex
+        pe_asian_female <- point_estimates[[paste0(bin_str, "asian_female")]]
+        pe_white_female <- point_estimates[[paste0(bin_str, "white_female")]]
+        pe_black_female <- point_estimates[[paste0(bin_str, "black_female")]]
+        pe_asian_male <- point_estimates[[paste0(bin_str, "asian_male")]]
+        pe_white_male <- point_estimates[[paste0(bin_str, "white_male")]]
+        pe_black_male <- point_estimates[[paste0(bin_str, "black_male")]]
+        
+        if (!is.na(pe_asian_female) && !is.na(pe_asian_male)) {
+          point_estimates[[paste0(bin_str, "diff_asian_FM")]] <- pe_asian_female - pe_asian_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_asian_FM")]] <- NA
+        }
+        
+        if (!is.na(pe_white_female) && !is.na(pe_white_male)) {
+          point_estimates[[paste0(bin_str, "diff_white_FM")]] <- pe_white_female - pe_white_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_white_FM")]] <- NA
+        }
+        
+        if (!is.na(pe_black_female) && !is.na(pe_black_male)) {
+          point_estimates[[paste0(bin_str, "diff_black_FM")]] <- pe_black_female - pe_black_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_black_FM")]] <- NA
+        }
+        
+        # Same sex, different race (male)
+        if (!is.na(pe_asian_male) && !is.na(pe_white_male)) {
+          point_estimates[[paste0(bin_str, "diff_male_asian_white")]] <- pe_asian_male - pe_white_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_male_asian_white")]] <- NA
+        }
+        
+        if (!is.na(pe_asian_male) && !is.na(pe_black_male)) {
+          point_estimates[[paste0(bin_str, "diff_male_asian_black")]] <- pe_asian_male - pe_black_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_male_asian_black")]] <- NA
+        }
+        
+        if (!is.na(pe_white_male) && !is.na(pe_black_male)) {
+          point_estimates[[paste0(bin_str, "diff_male_white_black")]] <- pe_white_male - pe_black_male
+        } else {
+          point_estimates[[paste0(bin_str, "diff_male_white_black")]] <- NA
+        }
+        
+        # Same sex, different race (female)
+        if (!is.na(pe_asian_female) && !is.na(pe_white_female)) {
+          point_estimates[[paste0(bin_str, "diff_female_asian_white")]] <- pe_asian_female - pe_white_female
+        } else {
+          point_estimates[[paste0(bin_str, "diff_female_asian_white")]] <- NA
+        }
+        
+        if (!is.na(pe_asian_female) && !is.na(pe_black_female)) {
+          point_estimates[[paste0(bin_str, "diff_female_asian_black")]] <- pe_asian_female - pe_black_female
+        } else {
+          point_estimates[[paste0(bin_str, "diff_female_asian_black")]] <- NA
+        }
+        
+        if (!is.na(pe_white_female) && !is.na(pe_black_female)) {
+          point_estimates[[paste0(bin_str, "diff_female_white_black")]] <- pe_white_female - pe_black_female
+        } else {
+          point_estimates[[paste0(bin_str, "diff_female_white_black")]] <- NA
+        }
+      }
+      
+      # Initialize bootstrap storage list (for standard errors)
+      bootstrap <- list()
+      for (name in names(point_estimates)) {
+        bootstrap[[name]] <- numeric(B)
+      }
+      
+      # Bootstrap loop - sampling WITHOUT replacement (as per code 1)
+      set.seed(123)
+      for (b_i in seq_len(B)) {
+        cat(sprintf("\rBootstrap iteration: %d/%d", b_i, B))
+        
+        # Sample without replacement
+        idx_b <- sample(seq_len(total_size), size = sample_size, replace = FALSE)
+        sample_data <- relax[idx_b, ]
+        
+        # Loop through ADI bins
+        for (bin_val in c(1, 2, 3, 4)) {
+          bin_data <- sample_data[sample_data$ADI_NATRANK_BIN == bin_val, ]
+          bin_str <- paste0("bin", bin_val, "_")
+          
+          # By sex
+          female_bin_data <- bin_data[bin_data$sex == 1, ]
+          male_bin_data <- bin_data[bin_data$sex == 0, ]
+          
+          # Calculate c-index for sex groups if they have sufficient data
+          if (nrow(female_bin_data) >= 5) {
+            cidx_female_bin <- calculate_cindex(female_bin_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "general_female")]][b_i] <- cidx_female_bin
+          }
+          
+          if (nrow(male_bin_data) >= 5) {
+            cidx_male_bin <- calculate_cindex(male_bin_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "general_male")]][b_i] <- cidx_male_bin
+          }
+          
+          # Calculate sex difference if both have data
+          if (exists("cidx_female_bin") && exists("cidx_male_bin")) {
+            bootstrap[[paste0(bin_str, "diff_female_male")]][b_i] <- 
+              cidx_female_bin - cidx_male_bin
+          }
+          
+          # Race-sex subgroups
+          # Female
+          asian_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "Asian", ]
+          white_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "White", ]
+          black_female_data <- bin_data[bin_data$sex == 1 & bin_data$race == "Black", ]
+          
+          # Calculate c-indices for female race subgroups
+          if (nrow(asian_female_data) >= 5) {
+            cidx_asian_female <- calculate_cindex(asian_female_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "asian_female")]][b_i] <- cidx_asian_female
+          }
+          
+          if (nrow(white_female_data) >= 5) {
+            cidx_white_female <- calculate_cindex(white_female_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "white_female")]][b_i] <- cidx_white_female
+          }
+          
+          if (nrow(black_female_data) >= 5) {
+            cidx_black_female <- calculate_cindex(black_female_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "black_female")]][b_i] <- cidx_black_female
+          }
+          
+          # Male
+          asian_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "Asian", ]
+          white_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "White", ]
+          black_male_data <- bin_data[bin_data$sex == 0 & bin_data$race == "Black", ]
+          
+          # Calculate c-indices for male race subgroups
+          if (nrow(asian_male_data) >= 5) {
+            cidx_asian_male <- calculate_cindex(asian_male_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "asian_male")]][b_i] <- cidx_asian_male
+          }
+          
+          if (nrow(white_male_data) >= 5) {
+            cidx_white_male <- calculate_cindex(white_male_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "white_male")]][b_i] <- cidx_white_male
+          }
+          
+          if (nrow(black_male_data) >= 5) {
+            cidx_black_male <- calculate_cindex(black_male_data, event_col, risk_col)
+            bootstrap[[paste0(bin_str, "black_male")]][b_i] <- cidx_black_male
+          }
+          
+          # Calculate pairwise differences if data is available
+          # Same race, different sex
+          if (exists("cidx_asian_female") && exists("cidx_asian_male")) {
+            bootstrap[[paste0(bin_str, "diff_asian_FM")]][b_i] <- 
+              cidx_asian_female - cidx_asian_male
+          }
+          
+          if (exists("cidx_white_female") && exists("cidx_white_male")) {
+            bootstrap[[paste0(bin_str, "diff_white_FM")]][b_i] <- 
+              cidx_white_female - cidx_white_male
+          }
+          
+          if (exists("cidx_black_female") && exists("cidx_black_male")) {
+            bootstrap[[paste0(bin_str, "diff_black_FM")]][b_i] <- 
+              cidx_black_female - cidx_black_male
+          }
+          
+          # Same sex, different race (male)
+          if (exists("cidx_asian_male") && exists("cidx_white_male")) {
+            bootstrap[[paste0(bin_str, "diff_male_asian_white")]][b_i] <- 
+              cidx_asian_male - cidx_white_male
+          }
+          
+          if (exists("cidx_asian_male") && exists("cidx_black_male")) {
+            bootstrap[[paste0(bin_str, "diff_male_asian_black")]][b_i] <- 
+              cidx_asian_male - cidx_black_male
+          }
+          
+          if (exists("cidx_white_male") && exists("cidx_black_male")) {
+            bootstrap[[paste0(bin_str, "diff_male_white_black")]][b_i] <- 
+              cidx_white_male - cidx_black_male
+          }
+          
+          # Same sex, different race (female)
+          if (exists("cidx_asian_female") && exists("cidx_white_female")) {
+            bootstrap[[paste0(bin_str, "diff_female_asian_white")]][b_i] <- 
+              cidx_asian_female - cidx_white_female
+          }
+          
+          if (exists("cidx_asian_female") && exists("cidx_black_female")) {
+            bootstrap[[paste0(bin_str, "diff_female_asian_black")]][b_i] <- 
+              cidx_asian_female - cidx_black_female
+          }
+          
+          if (exists("cidx_white_female") && exists("cidx_black_female")) {
+            bootstrap[[paste0(bin_str, "diff_female_white_black")]][b_i] <- 
+              cidx_white_female - cidx_black_female
+          }
+          
+          # Clear temporary variables
+          if (exists("cidx_female_bin")) rm(cidx_female_bin)
+          if (exists("cidx_male_bin")) rm(cidx_male_bin)
+          if (exists("cidx_asian_female")) rm(cidx_asian_female)
+          if (exists("cidx_white_female")) rm(cidx_white_female)
+          if (exists("cidx_black_female")) rm(cidx_black_female)
+          if (exists("cidx_asian_male")) rm(cidx_asian_male)
+          if (exists("cidx_white_male")) rm(cidx_white_male)
+          if (exists("cidx_black_male")) rm(cidx_black_male)
+        }
+      }
+      
+      cat("\nCalculating confidence intervals...\n")
+      
+      # Calculate standard errors and CIs using bootstrap samples
+      # Adjust standard errors with scaling factor as in code 1
+      summary_list <- list()
+      for (name in names(point_estimates)) {
+        # Get bootstrap results for this measure
+        boot_values <- bootstrap[[name]]
+        pe <- point_estimates[[name]]
+        
+        # Calculate standard error (adjusted by scaling factor)
+        se <- sd(boot_values, na.rm = TRUE) * scaling_factor
+        
+        # Calculate 95% CI
+        lower <- pe - 1.96 * se
+        upper <- pe + 1.96 * se
+        
+        summary_list[[name]] <- c(mean = pe, lower = lower, upper = upper)
+      }
+      
+      # Convert to dataframe
+      summary_df <- do.call(rbind, summary_list)
+      summary_df <- as.data.frame(summary_df)
+      colnames(summary_df) <- c("mean", "lower95", "upper95")
+      rownames(summary_df) <- names(summary_list)
+      
+      # Format results as in code 2
+      single_col <- sprintf("%.4f (%.4f ~ %.4f)",
+                          summary_df$mean,
+                          summary_df$lower95,
+                          summary_df$upper95)
+      
+      final_df <- data.frame(
+        subgroup = rownames(summary_df),
+        `mean (lower95~upper95)` = single_col,
+        stringsAsFactors = FALSE
+      )
+      
+      
+      # Create Excel workbook (as in code 2)
+      library(openxlsx)
+      filename <- paste0("results/", time_horizon, "y_adi_stratified_prevent_bootstrap_", outcome, ".xlsx")
+      wb <- createWorkbook()
+      addWorksheet(wb, "Results")
+      writeData(wb, "Results", final_df)
+      saveWorkbook(wb, file = filename, overwrite = TRUE)
+      
+      cat("\nResults saved to:", filename, "\n")
+    }
+  }
+  
+  cat("\nAnalysis completed. All files saved in the 'results' directory.\n")
+}
+
+# Run the analysis
+run_bootstrap_analysis(relax)
+```
