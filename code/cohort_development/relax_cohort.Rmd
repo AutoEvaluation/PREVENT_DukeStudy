@@ -1,0 +1,1609 @@
+
+## Define library path where R looks for installed packages and load them
+```{r, warning=F, message=F}
+.libPaths("P://Pro00110219 - Predictive modeling using EHR/ch513/Rtools")
+#install.packages ("dplyr", repo="http://archive.linux.duke.edu/cran/")
+packageVersion("rlang")
+library(RODBC)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(tableone)
+library(Hmisc)
+library(caret)
+library(survival)
+```
+
+
+## Relaxed Cohort Logic:
+
+
+## Phase 1:
+## - Patients with outpatient visit between 2016 to 2018
+## - Patients without CVD events before 2016
+
+```{r, warning=FALSE}
+## 1138417 patients
+setwd("../../ch513/PREVENT/data")
+load('pat_enroll.RData')
+length(pat_enroll)
+```
+
+
+## Phase 2:
+## - Patients with either SCRE or SBP
+
+```{r}
+## 1056028 patients
+setwd("../../ch513/PREVENT/data")
+load('pat_list_lab.RData')
+load('pat_list_vital.RData')
+load('dat_lab_cvd1.RData')
+dat_phase2 <- pat_enroll[pat_enroll %in% dat_lab_cvd1[dat_lab_cvd1$lab=="scre",]$PATID | pat_enroll %in% pat_list_sbp]
+length(dat_phase2)
+```
+
+## Phase 3:
+## - Both SCRE and SBP measured after 2016
+## - Index Date: Patients have SCRE and SBP in same year, set Index Date as later date between SCRE and SBP
+## - Patients without CVD before index date
+
+
+```{r}
+## 579768 patients have both SCRE and SBP after 2016
+setwd("../../ch513/PREVENT/data")
+load('dat_sbp.RData')
+dat_scre=dat_lab_cvd1[dat_lab_cvd1$lab=="scre",c("PATID", "SPECIMEN_DATE",'RESULT_NUM', "lab")]
+colnames(dat_scre)[2:4]=c("DATE", "Result", "VAR")
+dat_sbp_working=dat_sbp[,c("PATID", "MEASURE_DATE", 'vital_value_ave')]
+dat_sbp_working=data.frame(dat_sbp_working, var="sbp")
+colnames(dat_sbp_working)=colnames(dat_scre)
+
+dat_scre_working=dat_scre %>%
+  filter(as.Date(DATE) > as.Date('2015-12-31'))
+
+dat_sbp_working=dat_sbp_working %>%
+  filter(as.Date(DATE) > as.Date('2015-12-31'))
+
+pat_both <- Reduce(union, list(unique(dat_sbp_working$PATID), 
+                               unique(dat_scre_working$PATID)))
+
+pat_both <- intersect(pat_both, dat_phase2)
+
+
+dat_scre_working=dat_scre_working %>%
+  filter(PATID %in%pat_both)
+
+dat_sbp_working=dat_sbp_working %>%
+  filter(PATID %in%pat_both)
+
+df_sbp=dat_sbp_working
+df_scre=dat_scre_working
+
+setDT(df_sbp)
+setDT(df_scre)
+
+df_sbp <- df_sbp[,.(patid=PATID, sbp_date = DATE, sbp_result = Result)]
+df_scre <- df_scre[,.(patid=PATID, scre_date = DATE, scre_result = Result)]
+
+df_sbp[, sbp_date := as.IDate(sbp_date)] 
+df_scre[, scre_date := as.IDate(scre_date)] 
+
+df_sbp <- unique(df_sbp)
+df_scre <- unique(df_scre)
+
+df_sbp[, `:=`(start_date = sbp_date - 365, end_date = sbp_date + 365)]
+
+num_chunks <- ceiling(length(pat_both) / 1000)
+
+
+dat_index <- NULL
+
+for (i in 1:num_chunks) {
+  print(i)
+  ind <- 1:1000 + ((i - 1) * 1000)
+  pat_tmp <- pat_both[ind]
+  
+  # filter data for the current chunk
+  df_sbp_tmp <- df_sbp %>% filter(patid %in% pat_tmp)
+  df_scre_tmp <- df_scre %>% filter(patid %in% pat_tmp)
+  
+  # inner join with the date range condition
+  tmp <- inner_join(df_scre_tmp, df_sbp_tmp,
+                    join_by(patid == patid, scre_date >= start_date, scre_date <= end_date))
+  
+  # get min date and absolute date difference
+  tmp$col.min <- pmin(tmp$scre_date, tmp$sbp_date, na.rm = TRUE)
+  tmp$col.diff <- abs(as.numeric(tmp$scre_date) - as.numeric(tmp$sbp_date))
+  
+  # filter rows with the minimum col.min for each PATID
+  min_rows <- tmp[, .I[col.min == min(col.min, na.rm = TRUE)], by = patid]$V1
+  tmp_sel <- tmp[min_rows]
+  
+  # filter rows with the minimum col.diff for each PATID
+  min_rows <- tmp_sel[, .I[col.diff == min(col.diff, na.rm = TRUE)], by = patid]$V1
+  tmp_sel <- tmp_sel[min_rows]
+  
+  # assign INDEX_DATE as the later of scre_date and sbp_date
+  tmp_sel$INDEX_DATE <- pmax(tmp_sel$scre_date, tmp_sel$sbp_date, na.rm = TRUE)
+  
+  # subset to PATID and INDEX_DATE columns
+  tmp_result <- tmp_sel[, .(PATID = patid, INDEX_DATE, scre = scre_result, sbp = sbp_result)]
+  
+  ## Secondary Condition: Patients who don't have scre&sbp within 1 year, OR only has 1 lab, use earliest lab date
+  pat_missing <- setdiff(pat_tmp, tmp_result$PATID)
+  
+  if (length(pat_missing) > 0) {
+    
+    # create a combined table, tagging each row by type = "scre" or "sbp"
+    tmp_sbp_miss <- df_sbp_tmp[
+      patid %in% pat_missing, 
+      .(patid, date = sbp_date, type = "sbp", result = sbp_result)
+    ]
+    tmp_scre_miss <- df_scre_tmp[
+      patid %in% pat_missing,
+      .(patid, date = scre_date, type = "scre", result = scre_result)
+    ]
+    
+    # combine
+    tmp_all_miss <- rbind(tmp_sbp_miss, tmp_scre_miss, use.names = TRUE, fill = TRUE)
+    
+    # for each patient, pick the row with the earliest date
+    setorder(tmp_all_miss, patid, date)
+    tmp_earliest <- tmp_all_miss[, .SD[1], by = patid]
+    
+    # columns for scre / sbp depending on the type
+    tmp_earliest[, scre := ifelse(type == "scre", result, NA)]
+    tmp_earliest[, sbp  := ifelse(type == "sbp",  result, NA)]
+    
+    # rename final columns
+    tmp_earliest[, INDEX_DATE := date]
+    tmp_earliest[, PATID      := patid]
+    tmp_earliest[, c("patid", "date", "type", "result") := NULL]
+    
+    # combine with the paired results
+    tmp_result <- rbind(tmp_result, tmp_earliest, fill=TRUE)
+  }
+  # append to the final result
+  dat_index <- rbind(dat_index, tmp_result)
+}
+dat_index <- dat_index[, .SD[1], by = PATID]
+length(unique(dat_index$PATID))
+```
+
+
+```{r}
+## 549572 patients don't have cvd before index date
+# no cvd before index date
+dat_index1 = dat_index[, c("PATID", "INDEX_DATE")]
+load('../../ch513/PREVENT/data/dat_diagnosis_cvd1.RData')
+dat_cvd_lookback = inner_join(data.frame(dat_diagnosis_cvd1), dat_index1, by="PATID")
+dat_cvd_lookback$diff=as.Date(dat_cvd_lookback$INDEX_DATE)-as.Date(dat_cvd_lookback$ADMIT_DATE)
+dat_cvd_lookback$diff_year=dat_cvd_lookback$diff/365
+dat_cvd_lookback=dat_cvd_lookback[which(is.na(dat_cvd_lookback$diff_year)!=1),]
+dat_cvd_lookback=dat_cvd_lookback[which(dat_cvd_lookback$diff_year>=0),]
+pat_cvd_lookback=unique(dat_cvd_lookback$PATID)
+
+# exclude PATIDs in pat_cvd_lookback
+dat_phase3 <- pat_both[!(pat_both %in% pat_cvd_lookback)]
+length(unique(dat_phase3))
+```
+
+
+## Phase 4
+
+## - Patients with age, sex and race
+## - Patients have at least one followup at 7 days after the index date 
+## - Patients have index date within 2016-2018
+
+
+```{r}
+## 549571 patients have both age, sex and race info
+load('../../ch513/PREVENT/data/dat_demo.RData')
+pat_age <- dat_demo[!is.na(BIRTH_DATE), .N, by = .(PATID)]$PATID
+pat_sex <- dat_demo[!is.na(SEX), .N, by = .(PATID)]$PATID
+pat_race <- dat_demo[!is.na(RACE), .N, by = .(PATID)]$PATID
+pat_demo <- unique(Reduce(intersect, list(pat_age, pat_sex, pat_race)))
+
+# exclude PATIDs without demographic data
+dat_phase4_temp <- dat_phase3[dat_phase3 %in% pat_demo]
+length(unique(dat_phase4_temp))
+```
+
+```{r}
+# 516489 patients have at least 1 follow up at 7 days after index date
+load('../../ch513/PREVENT/data/dat_followup_wide.RData')
+
+# get unique PATID and INDEX_DATE from dat_demo
+dat_followup <- dat_index[dat_index$PATID %in% dat_phase4_temp, c('PATID', 'INDEX_DATE')]
+
+# join with dat_followup_wide
+dat_phase4_joined <- inner_join(dat_followup, dat_followup_wide, by = "PATID")
+
+# at least 1 follow up at 7 days after index date
+dat_phase4_joined$followup_days_since_index = as.Date(dat_phase4_joined$end_date)-as.Date(dat_phase4_joined$INDEX_DATE)
+dat_phase4_joined = dat_phase4_joined[dat_phase4_joined$followup_days_since_index>=7, ]
+dat_phase4_follow = dat_followup[dat_followup$PATID %in% dat_phase4_joined$PATID, ]
+length(unique(dat_phase4_follow$PATID))
+```
+
+```{r}
+# 406230 patients have index date within 2016-2018
+dat_phase4 = dat_phase4_follow[dat_phase4_follow$INDEX_DATE<"2019-01-01" & dat_phase4_follow$INDEX_DATE>="2016-01-01", ]
+length(unique(dat_phase4$PATID))
+```
+
+## Phase 5:
+
+## clean data for each patient in final relaxed cohort
+
+## Labs
+
+```{r}
+setwd("../../ch513/PREVENT/data")
+load('dat_bmi.RData')
+
+relax_cohort = dat_index[dat_index$PATID %in% dat_phase4$PATID,]
+dat_phase4 <- inner_join(dat_phase4, dat_lab_cvd1, by = "PATID") %>% 
+  select(PATID, SPECIMEN_DATE, INDEX_DATE, RESULT_NUM, lab)
+
+# tc
+dat_lab_tc=dat_phase4[which(dat_phase4$lab=="tc"),]
+setDT(dat_lab_tc)
+dat_lab_tc[, diff := as.Date(INDEX_DATE) - as.Date(SPECIMEN_DATE)]
+dat_lab_tc[, diff_year := diff / 365]
+dat_lab_tc <- dat_lab_tc[!is.na(diff_year) & diff_year < 3 & diff_year >= 0]
+dat_lab_tc_min_diff <- dat_lab_tc[order(PATID, diff)][, .SD[1], by = PATID]
+dat_lab_tc_min_diff <- dat_lab_tc_min_diff[, .(PATID, tc = RESULT_NUM)]
+
+
+# hdlc
+dat_lab_hdlc=dat_phase4[which(dat_phase4$lab=="hdlc"),]
+setDT(dat_lab_hdlc)
+dat_lab_hdlc[, diff := as.Date(INDEX_DATE) - as.Date(SPECIMEN_DATE)]
+dat_lab_hdlc[, diff_year := diff / 365]
+dat_lab_hdlc <- dat_lab_hdlc[!is.na(diff_year) & diff_year < 3 & diff_year >= 0]
+dat_lab_hdlc_min_diff <- dat_lab_hdlc[order(PATID, diff)][, .SD[1], by = PATID]
+dat_lab_hdlc_min_diff <- dat_lab_hdlc_min_diff[, .(PATID, hdlc = RESULT_NUM)]
+
+# bmi
+dat_vital_bmi=inner_join(data.frame(dat_bmi), relax_cohort[,c('PATID','INDEX_DATE')], by="PATID")
+dat_vital_bmi=setDT(dat_vital_bmi)
+dat_vital_bmi[, diff := as.Date(INDEX_DATE) - as.Date(MEASURE_DATE)]
+dat_vital_bmi[, diff_year := diff / 365]
+dat_vital_bmi <- dat_vital_bmi[!is.na(diff_year) & diff_year < 3 & diff_year >= 0]
+dat_vital_bmi_min_diff <- dat_vital_bmi[order(PATID, diff)][, .SD[1], by = PATID]
+dat_vital_bmi_min_diff <- dat_vital_bmi_min_diff[, .(PATID, bmi = vital_value_ave)]
+
+# scre
+scre_table <- dat_phase4[dat_phase4$lab == 'scre', ]
+missing_scre_patients <- relax_cohort %>% filter(is.na(scre)) %>% select(PATID)
+scre_table <- scre_table %>% filter(PATID %in% missing_scre_patients$PATID)
+setDT(scre_table)
+scre_table[, diff := as.Date(INDEX_DATE) - as.Date(SPECIMEN_DATE)]
+scre_table[, diff_year := diff / 365]
+scre_table <- scre_table[!is.na(diff_year) & diff_year < 3 & diff_year >= 0]
+scre_table_min_diff <- scre_table[order(PATID, diff)][, .SD[1], by = PATID]
+relax_cohort <- relax_cohort %>%
+  left_join(scre_table_min_diff %>% select(PATID, RESULT_NUM), by = "PATID") %>%
+  mutate(scre = ifelse(is.na(scre), RESULT_NUM, scre)) %>%
+  select(-RESULT_NUM)
+
+# sbp
+setwd("../../ch513/PREVENT/data")
+load('dat_sbp.RData')
+dat_sbp = dat_sbp[,c("PATID", "MEASURE_DATE", 'vital_value_ave')]
+sbp_table = inner_join(data.frame(dat_sbp), relax_cohort[,c('PATID','INDEX_DATE')], by="PATID")
+sbp_table <- sbp_table %>% rename(SPECIMEN_DATE = MEASURE_DATE, RESULT_NUM = vital_value_ave)
+missing_sbp_patients <- relax_cohort %>% filter(is.na(sbp)) %>% select(PATID)
+sbp_table <- sbp_table %>% filter(PATID %in% missing_sbp_patients$PATID)
+setDT(sbp_table)
+sbp_table[, diff := as.Date(INDEX_DATE) - as.Date(SPECIMEN_DATE)]
+sbp_table[, diff_year := diff / 365]
+sbp_table <- sbp_table[!is.na(diff_year) & diff_year < 3 & diff_year >= 0]
+sbp_table_min_diff <- sbp_table[order(PATID, diff)][, .SD[1], by = PATID]
+relax_cohort <- relax_cohort %>%
+  left_join(sbp_table_min_diff %>% select(PATID, RESULT_NUM), by = "PATID") %>%
+  mutate(sbp = ifelse(is.na(sbp), RESULT_NUM, sbp)) %>%
+  select(-RESULT_NUM)
+
+  
+# join all
+relax_cohort <- left_join(relax_cohort, dat_lab_tc_min_diff, by = "PATID")
+relax_cohort <- left_join(relax_cohort, dat_lab_hdlc_min_diff, by = "PATID")
+relax_cohort <- left_join(relax_cohort, dat_vital_bmi_min_diff, by = "PATID")
+
+# check: no one row have all 5 labs missing at the same time
+relax_cohort %>%
+  filter(is.na(scre) & is.na(sbp) & is.na(tc) & is.na(hdlc) & is.na(bmi)) %>%
+  nrow()
+```
+## Demographic
+
+```{r}
+dat_demographic <- setDT(dat_demo)
+dat_demographic <- dat_demographic[dat_demographic$PATID %in% relax_cohort$PATID, ]
+dat_demographic <- dat_demographic[, .(PATID, BIRTH_DATE, DEATH_DATE, sex = SEX, race = RACE)]
+relax_cohort <- left_join(relax_cohort, dat_demographic, by = "PATID")
+relax_cohort[, age := (as.Date(INDEX_DATE) - as.Date(BIRTH_DATE)) / 365]
+relax_cohort[, time2death := (as.Date(DEATH_DATE) - as.Date(INDEX_DATE)) / 365]
+relax_cohort[, BIRTH_DATE := NULL]
+relax_cohort[, DEATH_DATE := NULL]
+relax_cohort[, age := as.numeric(age)]
+relax_cohort[, time2death := as.numeric(time2death)]
+```
+
+## Event
+
+```{r}
+#Codeset for outcomes
+mi_codes_icd9 <- c("410")
+stroke_codes_icd9=c("431", "432", "433", "434")
+hf_codes_icd9 <- c("428")
+mi_codes_icd10 <- c("I21", "I22", "I23")
+stroke_codes_icd10=c("I61", "I62", "I63")
+hf_codes_icd10 <- c("I50")
+```
+
+
+```{r}
+# use icd code to filter event
+dat_cvd_lookup <- dat_diagnosis_cvd1[dat_diagnosis_cvd1$PATID %in% relax_cohort$PATID, ]
+dat_event0=dat_cvd_lookup
+dat_event0$event=NA
+for(nm in c("mi","stroke", "hf")){
+  print(nm)
+  nm.working1=paste0(nm, "_codes_icd9")
+  nm.working2=paste0(nm, "_codes_icd10")
+  
+  xx=paste(unlist(lapply(c(get(nm.working1),get(nm.working2)), function(x) paste0("^",x))), collapse="|")
+  
+  ind <- which(grepl(xx,dat_event0$DX))
+  dat_event0$event[ind]=nm
+}
+
+# join for INDEX DATE
+dat_event0 <- left_join(dat_event0, relax_cohort[, .(PATID, INDEX_DATE)], by = 'PATID')
+
+# get diff year
+setDT(dat_event0)
+dat_event0[, diff_year := as.numeric(as.Date(ADMIT_DATE) - as.Date(INDEX_DATE)) / 365]
+
+# mi
+dat_mi=dat_event0[dat_event0$event=="mi",]
+dat_mi<- dat_mi[dat_mi[, .I[which.min(diff_year)], by = PATID]$V1]
+dat_mi=dat_mi[, .(PATID, diff_year)]
+colnames(dat_mi)[2]="time2mi"
+
+# stroke
+dat_stroke=dat_event0[dat_event0$event=="stroke",]
+dat_stroke<- dat_stroke[dat_stroke[, .I[which.min(diff_year)], by = PATID]$V1]
+dat_stroke=dat_stroke[, .(PATID, diff_year)]
+colnames(dat_stroke)[2]="time2stroke"
+
+# hf
+dat_hf=dat_event0[dat_event0$event=="hf",]
+dat_hf<- dat_hf[dat_hf[, .I[which.min(diff_year)], by = PATID]$V1]
+dat_hf=dat_hf[, .(PATID, diff_year)]
+colnames(dat_hf)[2]="time2hf"
+
+# join all time2 event
+relax_cohort <- left_join(relax_cohort, dat_mi, by = "PATID")
+relax_cohort <- left_join(relax_cohort, dat_stroke, by = "PATID")
+relax_cohort <- left_join(relax_cohort, dat_hf, by = "PATID")
+
+# follow up info
+setDT(relax_cohort)
+dat_followup_info <- dat_followup_wide[dat_followup_wide$PATID %in% relax_cohort$PATID,]
+relax_cohort <- left_join(relax_cohort, dat_followup_info[, .(PATID, end_date)], by = 'PATID')
+relax_cohort[, followup_years := as.numeric(as.Date(end_date) - as.Date(INDEX_DATE)) / 365]
+relax_cohort[, end_date := NULL]
+```
+
+
+## Save data
+```{r}
+write.csv(relax_cohort, '../data/relax_cohort/raw.csv', row.names = FALSE)
+```
+
+
+#### Data Cleaning
+
+## Oracle Database Connection
+```{r warning = F, message = F}
+# install RODBC package 
+# install.packages ("RODBC", repo="http://archive.linux.duke.edu/cran/") 
+# load RODBC package 
+library(RODBC)
+channel <- odbcConnect("DSR_PROD", believeNRows=FALSE) 
+sqlTables(channel, schema = "BI_ACE_VIEWS", tableType = "VIEW", tableName = "PCOR_RSH_%") 
+```
+
+
+## EDA - Missing Values
+
+```{r}
+raw = fread('../../data/relax_cohort/raw.csv')
+
+# eda for missing values
+colSums(is.na(raw))
+```
+
+## Binary Indicator and Missing Values
+
+```{r}
+# event 10 year
+raw$stroke_10y = 1 - is.na(raw$time2stroke)
+raw$mi_10y = 1 - is.na(raw$time2mi)
+raw$hf_10y = 1 - is.na(raw$time2hf)
+raw$death_10y = 1 - is.na(raw$time2death)
+raw$cvd_10y = 1 * ((raw$stroke_10y + raw$mi_10y + raw$hf_10y) > 0)
+
+
+# event 5 year
+raw$stroke_5y <- ifelse(!is.na(raw$time2stroke) & raw$time2stroke <= 5, 1, 0)
+raw$mi_5y <- ifelse(!is.na(raw$time2mi) & raw$time2mi <= 5, 1, 0)
+raw$hf_5y <- ifelse(!is.na(raw$time2hf) & raw$time2hf <= 5, 1, 0)
+raw$death_5y <- ifelse(!is.na(raw$time2death) & raw$time2death <= 5, 1, 0)
+raw$cvd_5y <- 1 * ((raw$stroke_5y + raw$mi_5y + raw$hf_5y) > 0)
+
+# gender
+raw$sex = ifelse(raw$sex == "F", 1, 0)
+
+# fills missing time-to-event values with total follow-up years
+raw$time2mi[is.na(raw$time2mi)] = raw$followup_years[is.na(raw$time2mi)]
+raw$time2stroke[is.na(raw$time2stroke)] = raw$followup_years[is.na(raw$time2stroke)]
+raw$time2hf[is.na(raw$time2hf)] = raw$followup_years[is.na(raw$time2hf)]
+raw$time2death[is.na(raw$time2death)] = raw$followup_years[is.na(raw$time2death)]
+
+setnames(raw, old = c("time2mi", "time2stroke", "time2hf", "time2death"),
+              new = c("time2mi_10y", "time2stroke_10y", "time2hf_10y", "time2death_10y"))
+
+raw$time2mi_5y     <- pmin(raw$time2mi_10y, 5)
+raw$time2stroke_5y <- pmin(raw$time2stroke_10y, 5)
+raw$time2hf_5y     <- pmin(raw$time2hf_10y, 5)
+raw$time2death_5y  <- pmin(raw$time2death_10y, 5)
+
+# cvd percentage
+sum(raw$cvd_10y)/length(raw$cvd_10y)
+
+colSums(is.na(raw))
+```
+
+
+## Calculate eGFR Based on Formula
+
+```{r}
+# define function to calculate eGFR
+calculate_eGFR <- function(sex, scre, age) {
+  if (is.na(scre)) {
+    return(NA)
+  }
+  if (sex == 1) {  # female
+    if (scre <= 0.7) {
+      gfr <- 142 * (scre / 0.7)^-0.241 * 0.9938^age
+    } else {
+      gfr <- 142 * (scre / 0.7)^-1.2 * 0.9938^age
+    }
+  } else {  # male
+    if (scre <= 0.9) {
+      gfr <- 142 * (scre / 0.9)^-0.302 * 0.9938^age
+    } else {
+      gfr <- 142 * (scre / 0.9)^-1.2 * 0.9938^age
+    }
+  }
+  return(gfr)
+}
+
+
+# apply function to the df
+raw$eGFR <- mapply(calculate_eGFR, raw$sex, raw$scre, raw$age)
+
+# view the updated df with the new eGFR variable
+head(raw)
+```
+
+
+## SDOH - PCOR_RSH_ADDR_GEO_VW
+
+```{r}
+dat_sdoh = NULL
+dat_sdoh = sqlQuery(channel, 
+paste0("SELECT PATID, ADDRESS_PERIOD_START, ADDRESS_PERIOD_END, ADI_NATRANK, ADI_STATERNK, ADI_VERSION
+FROM BI_ACE_VIEWS.PCOR_RSH_ADDR_GEO_VW"))
+
+# filter sdoh data for only final_pat cohort
+final_pat = raw$PATID
+dat_sdoh=dat_sdoh[which(dat_sdoh$PATID%in%final_pat),]
+
+# save sdoh data
+write.csv(dat_sdoh, "../data/relax_cohort/dat_sdoh.csv")
+```
+
+
+## Smoker Data - Vital
+
+```{r}
+# init an empty list to store data frames
+dat_vital_list <- list()
+
+# loop over all years
+for (my_year in c(14:23)) {
+  print(my_year)
+  load(file = paste0("P:/Pro00110219 - Predictive modeling using EHR/ch513/PREVENT/Data/dat_vital_cvd", my_year, ".RData"))
+  dat_vital_list[[my_year]] <- dat_vital_cvd
+}
+
+# combine
+dat_vital <- rbindlist(dat_vital_list)
+
+# filter
+final_pat <- raw$PATID
+dat_vital <- dat_vital[dat_vital$PATID %in% final_pat]
+
+# save
+fwrite(dat_vital, "../data/relax_cohort/dat_vital.csv")
+```
+
+
+```{r}
+# check missing smoker data in vital
+missing = c('NI','UN','OT')
+length(dat_vital[dat_vital$SMOKING %in% missing,]$SMOKING)/length(dat_vital$SMOKING)
+```
+
+## Smoker Data - ICD10
+
+```{r}
+# init an empty list to store data frames
+smoke_data_list <- list()
+
+# define regex pattern
+smoker_icd_pattern <- "^Z53\\.01|^O99\\.33|^F17|^Z72\\.0"
+
+# loop over all years
+for (my_year in c(14:23)) {
+  print(my_year)
+  load(file = paste0("P:/Pro00110219 - Predictive modeling using EHR/ch513/PREVENT/Data/dat_diagnosis", my_year, ".RData"))
+  setDT(dat_diagnosis)
+  
+  # filter data for final cohort and ICD codes for smoker
+  filtered_data <- dat_diagnosis[
+    PATID %in% raw$PATID & grepl(smoker_icd_pattern, DX), 
+    list(PATID, ADMIT_DATE, DX)
+  ]
+  
+  smoke_data_list[[my_year]] <- filtered_data
+}
+
+# combine
+dat_smoke <- rbindlist(smoke_data_list)
+
+# save the combined data
+fwrite(dat_smoke, '../data/relax_cohort/dat_smoke.csv')
+```
+
+
+## Diabetes Data - ICD 10
+
+```{r}
+dat_db = NULL
+final_pat = raw$PATID
+# loop over all years
+for (my_year in c(14:23)) {
+    print(my_year)
+    load(file = paste0("P:/Pro00110219 - Predictive modeling using EHR/ch513/PREVENT/Data/dat_diagnosis", my_year, ".RData"))
+    # filter data by final cohort & Diabetes ICD code in diagnosis
+    filtered_data <- dat_diagnosis %>% 
+      filter(PATID %in% final_pat & grepl("^E1[013]", DX)) %>% 
+      select(PATID, ADMIT_DATE, DX)
+    dat_db = rbind(dat_db, filtered_data)
+}
+
+# save
+write.csv(dat_db, '../data/relax_cohort/dat_db.csv')
+```
+
+
+## Med Data - Statin
+
+```{r}
+# define statin RXNORM codes
+statin_codes <- c("1790679","1944264","197903", "197904","197905","198211",
+                  "2001254","2001262", "2001266","200345","2167557",
+                  "2167565","2167569","2167573", "259255","310404","310405",
+                  "312961","312962","314231", "359731","359732",
+                  "360507","404011", "404013","433849",
+                  "476345","476349", "476350","476351",
+                  "597967","597971", "597974","597977",
+                  "597980","597984", "597987","597990",
+                  "597993","617310", "617311","617312","859419",
+                  "859424","859747","859751","861643", "861648","861652",
+                  "904458","904467", "904475","904481")
+
+# covert to single regular expression pattern
+pattern <- paste0("^(", paste(statin_codes, collapse = "|"), ")")
+
+# init an empty list to store data frames
+statin_data_list <- list()
+
+# final patient IDs
+final_pat <- raw$PATID
+
+# loop over all years
+for (my_year in c(15:23)) {
+    print(my_year)
+    load(file = paste0("P:/Pro00110219 - Predictive modeling using EHR/ch513/PREVENT/Data/dat_med", my_year, ".RData"))
+    
+    setDT(dat_med)
+    
+    # filter by final cohort and statin RXNORM code
+    filtered_data <- dat_med[
+      PATID %in% final_pat & grepl(pattern, RXNORM_CUI),
+      .(PATID, RX_ORDER_DATE, RXNORM_CUI)
+    ]
+    
+    statin_data_list[[my_year]] <- filtered_data
+}
+
+# combine
+dat_statin <- rbindlist(statin_data_list)
+
+# save
+fwrite(dat_statin, '../data/relax_cohort/dat_statin.csv')
+```
+
+
+##  Med Data - Anti-Hypertensive
+
+```{r}
+# define anti-hypertensive RXNORM code
+antihtn_codes <- c("10763","1369","1808","2396","2409","38413","4109","4603","5487","5495","5764","644",
+                      "6628","6916","8565","1191185","1297753","1297757", "1495058","1593725","1606347",
+                      "1606349","1798281","1923422","1923424","1923426","197379","197380","197381","197382",
+                      "197383","198000","198001","198006","198007","198008","198104","198105","198284","198285",
+                      "198286","200031","200032","200033","387013","686924","751612","751618","827073",
+                      "854901","854905","854908","854916","854919","856422","856429","856448","856457",
+                      "856460","856481","856519","856535","856556","856569","856578","856724","856733",
+                      "860510","860516","860522","860532","866412","866419","866427","866436","866452",
+                      "866461","866472","866479","866482","866491","866511","866514","866924","896758",
+                      "896762","896766","904589","998685","998689","17767","233603","33910","4316",
+                      "7396","7417","7426","7435","11170","3443","1000001","1091646","1091652","1235144",
+                      "1235151","1299859","1299871","1299890","1299896","1299897","1435624",
+                      "153822","153823","1600716","1600724","1600728","1656340","1656349","1656354",
+                      "197436","197437","197438","197439","197884","197885","197886","197887","198188","198189",
+                      "199351","199352","199353","200094","200095","200096","200284","200285","205304","205305",
+                      "205326","261962","282755","283316","283317","308962","308963","308964","310140","310792",
+                      "310793","310796","310797","310809","311353","311354","312748","312749",
+                      "312750","314076","314077","314203","317173","349199","349200","349201",
+                      "349353","349373","349401","349405","349483","351292","351293","403853","403854",
+                      "403855","477130","485471","577776","578325","578330","636042","636045",
+                      "639537","722126","722131","722134","722137","730861","730866","730869","730872",
+                      "802749","845488","848131","848135","848140","848145","848151","854925","854984",
+                      "854988","857166","857169","857174","857183","857187","858804","858810","858813",
+                      "858817","858824","858828","876514","876519","876524","876529","897781","897783",
+                      "897844","897853","898342","898346","898350","898353","898356","898359","898362",
+                      "898367","898372","898378","898687","898690","898719","898723","979464","979468",
+                      "979471","979480","979485","979492","999967","999986","999991","999996","198196",
+                      "198197","6876")
+
+# convert to single regular expression pattern
+pattern <- paste0("^(", paste(antihtn_codes, collapse = "|"), ")")
+
+# init an empty list to store data frames
+antihtn_data_list <- list()
+
+# final patient IDs
+final_pat <- raw$PATID
+
+# loop over all years
+for (my_year in c(15:23)) {
+    print(my_year)
+    load(file = paste0("P:/Pro00110219 - Predictive modeling using EHR/ch513/PREVENT/Data/dat_med", my_year, ".RData"))
+    
+    setDT(dat_med)
+    
+    # filter by final cohort and statin RXNORM code
+    filtered_data <- dat_med[
+      PATID %in% final_pat & grepl(pattern, RXNORM_CUI),
+      .(PATID, RX_ORDER_DATE, RXNORM_CUI)
+    ]
+    
+    antihtn_data_list[[my_year]] <- filtered_data
+}
+
+# combine
+dat_antihtn <- rbindlist(antihtn_data_list)
+
+# save
+fwrite(dat_antihtn, '../data/relax_cohort/dat_antihtn.csv')
+```
+
+
+## Insurance Type
+
+```{r}
+final_pat <- raw$PATID
+
+# chunk size
+chunk_size <- 500
+
+# split final_pat into batches
+batches <- split(final_pat, ceiling(seq_along(final_pat) / chunk_size))
+
+# init empty list
+dat_ins_list <- list()
+
+# loop through batches
+for (i in seq_along(batches)) {
+  print(i)
+  batch_ids <- batches[[i]]
+  
+  batch_str <- paste(sprintf("'%s'", batch_ids), collapse = ",")
+  
+  # sql query for this batch
+  query <- paste0("SELECT PATID, ADMIT_DATE, RAW_PAYER_TYPE_PRIMARY FROM BI_ACE_VIEWS.PCOR_RSH_ENC_VW WHERE PATID IN (",batch_str, ")")
+
+  
+  # query data and append to list
+  dat_ins_list[[i]] <- sqlQuery(channel, query)
+}
+
+# combine
+dat_ins <- do.call(rbind, dat_ins_list)
+
+# remove missing
+dat_ins <- na.omit(dat_ins)
+
+# save insurance data
+write.csv(dat_ins, "../data/relax_cohort/dat_ins.csv")
+```
+
+
+## Data Integration
+
+For diabetes, statin, and anti-hypertensive, label patient as 1 if there is such a record code within 3 years look back window of the Index Date of that patient.
+
+
+## Diabetes
+
+```{r}
+# load the dataset
+dat_db <- fread('../../data/relax_cohort/dat_db.csv')
+
+# convert ADMIT_DATE to Date format
+dat_db[, ADMIT_DATE := as.Date(ADMIT_DATE, format = "%Y-%m-%d")]
+
+# use data.table for faster operation
+setDT(dat_db)
+setDT(raw)
+
+# ensure INDEX_DATE is in POSIXct format in 'raw'
+raw[, INDEX_DATE := as.POSIXct(INDEX_DATE)]
+
+
+# join 'raw' and 'dat_db' on 'PATID'
+merged_data <- merge(raw, dat_db, by = "PATID", allow.cartesian = TRUE)
+
+# compare ADMIT_DATE with INDEX_DATE and create the 'diabetes' column
+merged_data[, diabetes := as.integer(
+  ADMIT_DATE <= as.Date(INDEX_DATE) & 
+  ADMIT_DATE >= as.Date(INDEX_DATE) - as.difftime(3 * 365, units = "days")
+)]
+
+
+# summarize by PATID, setting 'diabetes' to 1 if any condition is met
+result <- merged_data[, .(diabetes = max(diabetes)), by = .(PATID)]
+
+# join the summarized result back into 'raw'
+raw <- merge(raw, result, by = "PATID", all.x = TRUE)
+
+# before fillna: 44548 diabetes
+table(raw$diabetes)
+
+# replace NA values with 0 (for rows with no matching condition)
+raw[is.na(diabetes), diabetes := 0]
+
+# Diabetes Distribution: ~10.97% diabetes
+table(raw$diabetes)
+
+# remove unused dfs
+rm(dat_db, merged_data, result)
+gc()
+```
+
+
+## Medication - Statin
+
+```{r}
+# load the dataset
+dat_statin = fread('../../data/relax_cohort/dat_statin.csv')
+
+# convert RX_ORDER_DATE to date format
+dat_statin$RX_ORDER_DATE <- as.Date(dat_statin$RX_ORDER_DATE, format = "%Y-%m-%d")
+
+# ensure INDEX_DATE is in correct format (POSIXct/POSIXt)
+raw$INDEX_DATE <- as.POSIXct(raw$INDEX_DATE)
+
+# use data.table for faster operations on large datasets
+setDT(dat_statin)
+setDT(raw)
+
+# join 'raw' and 'dat_statin' on 'PATID'
+merged_data <- merge(raw, dat_statin, by = "PATID", allow.cartesian = TRUE)
+
+# compare dates and create the 'statin' column based on the condition
+merged_data[, statin := as.integer(
+  RX_ORDER_DATE <= as.Date(INDEX_DATE) & 
+  RX_ORDER_DATE >= as.Date(INDEX_DATE) - as.difftime(3 * 365, units = "days")
+)]
+
+
+# summarize the result for each 'PATID' in the 'raw' dataset
+result <- merged_data[, .(statin = max(statin)), by = .(PATID)]
+
+# join 'statin' column back into the 'raw' dataframe
+raw <- merge(raw, result, by = "PATID", all.x = TRUE)
+
+# before fillna: 72603 statin
+table(raw$statin)
+
+# replace NA values with 0 in case there were no matching rows
+raw$statin[is.na(raw$statin)] <- 0
+
+# Statin Distribution: ~17.87% statin
+table(raw$statin)
+
+# remove unused dfs
+rm(dat_statin, merged_data, result)
+gc()
+```
+
+
+## Medication - Anti-Hypertensive
+
+```{r}
+# load dataset
+dat_antihtn = fread('../../data/relax_cohort/dat_antihtn.csv')
+
+# convert RX_ORDER_DATE to date format
+dat_antihtn$RX_ORDER_DATE <- as.Date(dat_antihtn$RX_ORDER_DATE, format = "%Y-%m-%d")
+
+# ensure INDEX_DATE is in correct format (POSIXct/POSIXt)
+raw$INDEX_DATE <- as.POSIXct(raw$INDEX_DATE)
+
+# use data.table for faster operations on large datasets
+setDT(dat_antihtn)
+setDT(raw)
+
+# join 'raw' and 'dat_antihtn' on 'PATID'
+merged_data <- merge(raw, dat_antihtn, by = "PATID", allow.cartesian = TRUE)
+
+# compare dates and create the 'antihtn' column based on the condition
+merged_data[, antihtn := as.integer(
+  RX_ORDER_DATE <= as.Date(INDEX_DATE) & 
+  RX_ORDER_DATE >= as.Date(INDEX_DATE) - as.difftime(3 * 365, units = "days")
+)]
+
+# summarize the result for each 'PATID' in the 'raw' dataset
+result <- merged_data[, .(antihtn = max(antihtn)), by = .(PATID)]
+
+# join 'antihtn' column back into the 'raw' dataframe
+raw <- merge(raw, result, by = "PATID", all.x = TRUE)
+
+# before fillna: 138616 anti-hypertensive
+table(raw$antihtn)
+
+# replace NA values with 0 in case there were no matching rows
+raw$antihtn[is.na(raw$antihtn)] <- 0
+
+# Anti-Hypertensive Distribution: ~34.12% antihtn
+table(raw$antihtn)
+
+# remove unused dfs
+rm(dat_antihtn, merged_data, result)
+gc()
+```
+
+
+
+## Smoker
+
+Vital Dataset: 
+
+01=Current every day smoker; 02=Current some day smoker;
+
+03=Former smoker; 04=Never smoker;
+
+05=Smoker, current status unknown; 06=Unknown if ever smoked; 07=Heavy tobacco smoker; 08=Light tobacco smoker;
+NI=No information; UN=Unknown; OT=Other
+
+Only consider 01, 02, 03, and 04 since they provide clear information on current smoking status
+
+```{r}
+dat_vital = fread('../../data/relax_cohort/dat_vital.csv')
+dat_smoke = fread('../../data/relax_cohort/dat_smoke.csv')
+table(dat_vital$SMOKING)
+length(unique(dat_smoke$PATID))
+length(unique(dat_vital$PATID))
+```
+
+```{r}
+# convert data to data.table for faster processing
+setDT(raw)
+setDT(dat_vital)
+setDT(dat_smoke)
+
+# convert date columns to time format
+dat_smoke[, ADMIT_DATE := as.Date(ADMIT_DATE, format = "%Y-%m-%d")]
+dat_vital[, MEASURE_DATE := as.Date(MEASURE_DATE, format = "%Y-%m-%d")]
+
+# select needed columns
+dat_vital <- dat_vital[, .(PATID, DATE = MEASURE_DATE, SMOKING)]
+dat_smoke <- dat_smoke[, .(PATID, DATE = ADMIT_DATE)]
+
+# step 1: label smoking status(current)
+# mark all records in dat_smoke as 1
+dat_smoke[, smoker := 1]
+# mark records in dat_vital based on SMOKING value
+dat_vital[SMOKING %in% c("01", "02"), smoker := 1]
+dat_vital[SMOKING %in% c("03", "04"), smoker := 0]
+dat_vital <- dat_vital[!is.na(smoker), .(PATID, DATE, smoker)]
+
+# step 2: stack the data together
+combined_data <- rbind(dat_smoke, dat_vital)
+
+# step 3: set key for faster operation: sort by PATID, then DATE
+setkey(combined_data, PATID, DATE)
+setkey(raw, PATID, INDEX_DATE)
+# join combined data with raw on PATID
+merged_data <- combined_data[raw, on = .(PATID), allow.cartesian = TRUE]
+
+# step 4: filter for dates before and after the INDEX_DATE
+merged_data[, `:=`(diff_before = as.numeric(as.Date(INDEX_DATE,format = "%Y-%m-%d") - DATE),  # difference in days before
+                   diff_after = as.numeric(DATE - as.Date(INDEX_DATE,format = "%Y-%m-%d")))]  # difference in days after
+
+# filter out rows where diff_before > 3 years or diff_after > 3 years
+three_years <- 3 * 365
+merged_data <- merged_data[diff_before <= three_years & diff_after <= three_years]
+
+
+# keep records before and after INDEX_DATE
+before_data <- merged_data[diff_before >= 0]
+after_data <- merged_data[diff_after >= 0]
+
+# step 5: find the closest record before the INDEX_DATE with a non-missing smoker value
+before_closest <- before_data[!is.na(smoker), .SD[which.min(diff_before)], by = .(PATID)]
+
+# if no record exists before, take the closest record after the INDEX_DATE with a non-missing smoker value
+after_closest <- after_data[!is.na(smoker), .SD[which.min(diff_after)], by = .(PATID)]
+
+
+# step 6: combine: label smoker based on closest record before index date, if no, use closest after index date
+final_smoker <- rbind(before_closest, after_closest)
+final_smoker <- final_smoker[, .SD[which.max(diff_before)], by = .(PATID)]
+
+# step 7: merge the final_smoker column back to raw
+raw <- merge(raw, final_smoker[, .(PATID, smoker)], by = "PATID", all.x = TRUE)
+
+# before fillna: 46631 current smokers
+table(raw$smoker)
+sum(is.na(raw$smoker))  # 13728 missing values (3.38% missing)
+
+# fill missing smoker values with 0: assume no data -> not current smoker
+raw[is.na(smoker), smoker := 0]
+
+# current Smoker Distribution: 11.48% smoker
+table(raw$smoker)
+
+# remove unused dfs
+rm(after_closest, after_data, before_closest, before_data, combined_data, dat_smoke, dat_vital, final_smoker, merged_data)
+gc()
+```
+
+
+## SDOH
+
+- Missing value in ADDRESS_PERIOD_END indicates CURRENT address according to https://sites.duke.edu/crdm/details-of-data-available/pcor_rsh_addr_geo_vw/
+
+- Rows missing ADI_STATERNK also have ADI_NATRANK missing, so delete those rows
+
+- Some ranks are not in number format(not introduced in website above), so delete those rows
+
+- 2019_ADI is the only version, so we don't include in future steps
+
+```{r}
+# load sdoh data
+dat_sdoh = fread('../../data/relax_cohort/dat_sdoh.csv')
+
+# check unqiue version
+unique(dat_sdoh$ADI_VERSION)
+
+# check missing
+colSums(is.na(dat_sdoh))
+
+# check if rows missing ADI_STATERNK also have ADI_NATRANK missing
+dat_sdoh %>%
+  filter(is.na(ADI_STATERNK) & is.na(ADI_NATRANK)) %>%
+  nrow()
+
+# filter out missing
+dat_sdoh <- dat_sdoh %>%
+  filter(!is.na(ADI_STATERNK) & !is.na(ADI_NATRANK))
+
+# convert rank to integer: rank become NaN if not number, then filter out
+dat_sdoh <- dat_sdoh %>%
+  mutate(
+    ADI_NATRANK = as.integer(ADI_NATRANK),
+    ADI_STATERNK = as.integer(ADI_STATERNK)
+  ) %>%
+  filter(!is.na(ADI_NATRANK) & !is.na(ADI_STATERNK))
+```
+
+```{r}
+# ensure datatype as date
+dat_sdoh <- dat_sdoh %>%
+  mutate(
+    ADDRESS_PERIOD_END = as.Date(ADDRESS_PERIOD_END),
+    ADDRESS_PERIOD_START = as.Date(ADDRESS_PERIOD_START)
+  )
+
+raw <- raw %>%
+  mutate(INDEX_DATE = as.Date(INDEX_DATE))
+
+# step 1: merge raw with dat_sdoh and filter primary matches:
+## Current Address: (Address start <= Index date <= address end) OR (Address start <= Index date  AND address end == NULL)
+primary_matches <- raw %>%
+  left_join(
+    dat_sdoh %>%
+      select(PATID, ADDRESS_PERIOD_START, ADDRESS_PERIOD_END, ADI_NATRANK, ADI_STATERNK),
+    by = "PATID"
+  ) %>%
+  mutate(
+    PRIMARY_MATCH = ADDRESS_PERIOD_START <= INDEX_DATE & 
+      (is.na(ADDRESS_PERIOD_END) | INDEX_DATE <= ADDRESS_PERIOD_END)
+  ) %>%
+  filter(PRIMARY_MATCH) %>%
+  group_by(PATID, INDEX_DATE) %>%
+  slice_min(ADDRESS_PERIOD_START) %>%
+  mutate(DATE_DIFF = 0) %>%
+  ungroup()
+
+# step 2: Filter rows without primary matches and find secondary matches
+## Not Current: Find closest record(either address start or end) to Index date(Automatically missing for PATID not in dat_sdoh)
+secondary_matches <- raw %>%
+  anti_join(primary_matches, by = c("PATID", "INDEX_DATE")) %>%
+  left_join(
+    dat_sdoh %>%
+      select(PATID, ADDRESS_PERIOD_START, ADDRESS_PERIOD_END, ADI_NATRANK, ADI_STATERNK),
+    by = "PATID") %>%
+  mutate(
+    DATE_DIFF = pmin(
+      abs(as.numeric(INDEX_DATE - ADDRESS_PERIOD_START)),
+      abs(as.numeric(INDEX_DATE - ADDRESS_PERIOD_END)),
+      na.rm = TRUE
+    )) %>%
+  group_by(PATID, INDEX_DATE) %>%
+  slice_min(DATE_DIFF, with_ties = FALSE) %>%
+  ungroup()
+
+# step 3: combine primary and secondary matches
+final_merged <- bind_rows(
+  primary_matches %>%
+    select(-ADDRESS_PERIOD_START, -ADDRESS_PERIOD_END, -PRIMARY_MATCH),
+  secondary_matches %>%
+    select(-ADDRESS_PERIOD_START, -ADDRESS_PERIOD_END))
+
+
+
+# 2893 patients missing in SDOH data
+raw <- final_merged
+colSums(is.na(raw))
+
+hist(raw$DATE_DIFF[!is.na(raw$DATE_DIFF) & raw$DATE_DIFF != 0], breaks = 100,
+     main = "Distribution of DATE_DIFF (Excluding NA and 0)", xlab = "DATE_DIFF", ylab = "Frequency")
+
+raw$DATE_DIFF <- NULL
+
+# remove unused dfs
+rm(dat_sdoh, final_merged, primary_matches, secondary_matches)
+gc()
+```
+
+## Insurance
+
+Use the insurance type record with minimal absolute difference in time between Index Date of that patient, leave as missing if no record available for that patient
+
+```{r}
+# load ins data
+dat_ins <- fread('../../data/relax_cohort/dat_ins.csv', check.names = FALSE)
+dat_ins <- dat_ins[, -1, with = FALSE]
+
+setDT(raw)
+setDT(dat_ins)
+
+# convert to date
+dat_ins[, ADMIT_DATE := as.Date(ADMIT_DATE)]
+raw[, INDEX_DATE := as.Date(INDEX_DATE)]
+
+# merge raw and dat_ins on PATID to get all possible combinations
+merged_data <- merge(raw, dat_ins, by = "PATID", allow.cartesian = TRUE)
+
+# calculate the absolute difference between ADMIT_DATE and INDEX_DATE
+merged_data[, abs_diff := abs(ADMIT_DATE - INDEX_DATE)]
+
+# for each PATID in the merged data, keep only the row with the minimum absolute difference
+merged_data <- merged_data[merged_data[, .I[which.min(abs_diff)], by = PATID]$V1]
+
+# add the selected RAW_PAYER_TYPE_PRIMARY back to raw as insurance_type
+raw <- merge(
+  raw, 
+  merged_data[, .(PATID, RAW_PAYER_TYPE_PRIMARY)], 
+  by = "PATID", 
+  all.x = TRUE
+)
+
+# rename column
+setnames(raw, "RAW_PAYER_TYPE_PRIMARY", "insurance_type")
+
+# remove unused dfs
+rm(dat_ins, merged_data, three_years)
+gc()
+```
+
+
+```{r}
+# save
+write.csv(raw, '../../data/relax_cohort2/cleaned_data.csv', row.names = FALSE)
+```
+
+
+## Data Imputation
+
+
+```{r}
+# load
+data = fread('../../data/relax_cohort2/cleaned_data.csv')
+data[, tc := ifelse(is.na(tc), median(tc, na.rm = TRUE), tc)]
+data[, hdlc := ifelse(is.na(hdlc), median(hdlc, na.rm = TRUE), hdlc)]
+data[, bmi := ifelse(is.na(bmi), median(bmi, na.rm = TRUE), bmi)]
+data[, scre := ifelse(is.na(scre), median(scre, na.rm = TRUE), scre)]
+data[, sbp := ifelse(is.na(sbp), median(sbp, na.rm = TRUE), sbp)]
+data[, eGFR := ifelse(is.na(eGFR), median(eGFR, na.rm = TRUE), eGFR)]
+```
+
+
+
+## Data Transformation
+
+```{r}
+# transform
+data$time2ascvd_10y <- pmin(data$time2mi_10y, data$time2stroke_10y)
+data$ascvd_10y <- 1*((data$stroke_10y+data$mi_10y)>0)
+data$time2cvd_10y <- pmin(data$time2mi_10y, data$time2stroke_10y, data$time2hf_10y)
+
+data$time2ascvd_5y <- pmin(data$time2mi_5y, data$time2stroke_5y)
+data$ascvd_5y <- 1*((data$stroke_5y+data$mi_5y)>0)
+data$time2cvd_5y <- pmin(data$time2mi_5y, data$time2stroke_5y, data$time2hf_5y)
+
+# calculate transformed 'age' column
+data$age <- (data$age - 55) / 10
+
+# calculate 'nonhdlc' based on 'tc' and 'hdlc'
+data$nonhdlc <- (data$tc - data$hdlc) * 0.02586 - 3.5
+
+# transform 'hdlc'
+data$hdlc <- (data$hdlc * 0.02586 - 1.3) / 0.3
+
+# calculate 'sbp1' using the min value of 'sbp' and 110
+data$sbp1 <- (pmin(data$sbp, 110) - 110) / 20
+
+# calculate 'sbp2' using the max value of 'sbp' and 110
+data$sbp2 <- (pmax(data$sbp, 110) - 130) / 20
+
+# calculate 'bmi1' using the min value of 'bmi' and 30
+data$bmi1 <- (pmin(data$bmi, 30) - 25) / 5
+
+# calculate 'bmi2' using the max value of 'bmi' and 30
+data$bmi2 <- (pmax(data$bmi, 30) - 30) / 5
+
+# calculate 'egfr1' using the min value of 'egfr' and 60
+data$egfr1 <- (pmin(data$eGFR, 60) - 60) / -15
+
+# calculate 'egfr2' using the max value of 'egfr' and 60
+data$egfr2 <- (pmax(data$eGFR, 60) - 90) / -15
+
+# calculate 'sbp2treat' as the product of 'sbp2' and 'antihtn'
+data$sbp2treat <- data$sbp2 * data$antihtn
+
+# calculate 'nonhdlctreat' as the product of 'nonhdlc' and 'statin'
+data$nonhdlctreat <- data$nonhdlc * data$statin
+
+# calculate 'agenonhdlc' as the product of 'age' and 'nonhdlc'
+data$agenonhdlc <- data$age * data$nonhdlc
+
+# calculate 'agehdlc' as the product of 'age' and 'hdlc'
+data$agehdlc <- data$age * data$hdlc
+
+# calculate 'agesbp2' as the product of 'age' and 'sbp2'
+data$agesbp2 <- data$age * data$sbp2
+
+# calculate 'agediabetes' as the product of 'age' and 'diabetes'
+data$agediabetes <- data$age * data$diabetes
+
+# calculate 'agecursmk' as the product of 'age' and 'cursmk'
+data$agecursmk <- data$age * data$smoker
+
+# calculate 'agebmi2' as the product of 'age' and 'bmi2'
+data$agebmi2 <- data$age * data$bmi2
+
+# calculate 'ageegfr1' as the product of 'age' and 'egfr1'
+data$ageegfr1 <- data$age * data$egfr1
+
+# set 'cons' column to 1 for all rows: for intercept
+data$cons <- 1
+
+# insurance
+data$insurance_group <- with(data,
+  ifelse(is.na(insurance_type), NA,
+    ifelse(insurance_type %in% c("COMMERCIAL", "MANAGED CARE", "NC BLUE CROSS", "OOS BLUE CROSS"),
+           "Commercial",
+    ifelse(insurance_type %in% c("MEDICARE", "MEDICARE ADVANTAGE"),
+           "Medicare",
+    ifelse(insurance_type %in% c("MEDICAID PENDING", "NC MEDICAID", "OOS MEDICAID"),
+           "Medicaid",
+    ifelse(insurance_type == "SELF-PAY",
+           "No Insurance",
+           "Other Insurance"))))))
+
+# split SDOH into quartiles
+data <- data %>%
+  mutate(
+    ADI_NATRANK_BIN = cut(
+      ADI_NATRANK,
+      breaks = seq(0, 100, by = 25),
+      labels = 1:4,
+      include.lowest = TRUE))
+
+# save
+write.csv(data, '../../data/relax_cohort2/transformed_data.csv', row.names = FALSE)
+```
+
+
+
+## PREVENT
+
+
+```{r}
+# 5 year coefficients
+coefficients_5y <- list(
+  female_cvd = matrix(c(
+    0.7939329, 0.0305239, -0.1606857, -0.2394003, 0.360078, 0.8667604,
+    0.5360739, 0.6045917, 0.0433769, 0.3151672, -0.1477655, -0.0663612,
+    0.1197879, -0.0819715, 0.0306769, -0.0946348, -0.27057, -0.078715,
+    -0.1637806, -4.165859
+  ), nrow = 20, ncol = 1),
+  male_cvd = matrix(c(
+    0.7688528, 0.0736174, -0.0954431, -0.4347345, 0.3362658, 0.7692857,
+    0.4386871, 0.5378979, 0.0164827, 0.288879, -0.1337349, -0.0475924,
+    0.150273, -0.0517874, 0.0191169, -0.1049477, -0.2251948, -0.0895067,
+    -0.1543702, -3.889299
+  ), nrow = 20, ncol = 1),
+  female_ascvd = matrix(c(
+    0.7198830247, 0.1176967025, -0.1511850059, -0.0835357979, 0.3592852056,
+    0.8348584771, 0.4831078053, 0.4864619076, 0.039777901, 0.2265308946,
+    -0.0592373982, -0.0395761989, 0.0844423026, -0.0567838997,
+    0.0325691998, -0.1035984978, -0.241754204, -0.0791141987,
+    -0.167149201, -4.691118
+  ), nrow = 20, ncol = 1),
+  male_ascvd = matrix(c(
+    0.7099847198, 0.1658663005, -0.1144284979, -0.2837212086, 0.3239977062,
+    0.7189596891, 0.3956972957, 0.369007498, 0.0203619003, 0.2036522031,
+    -0.0865581036, -0.0322915986, 0.1145630032, -0.0300005004,
+    0.0232746992, -0.0927024037, -0.2018525004, -0.0970527008,
+    -0.1217081025, -4.371798
+  ), nrow = 20, ncol = 1),
+  female_hf = matrix(c(
+    0.8998234868, -0.4559771121, 0.3576504886, 1.038346052, 0.5839160085,
+    -0.0072293999, 0.2997705936, 0.7451637983, 0.0557086989, 0.3534441888,
+    -0.0981511027, -0.0946663022, -0.3581041098, -0.1159453019,
+    -0.003878, -0.1884288937, -5.23739
+  ), nrow = 17, ncol = 1),
+  male_hf = matrix(c(
+    0.8972641826, -0.6811466217, 0.3634460866, 0.9237759709, 0.5023735762,
+    -0.0485840999, 0.3726929128, 0.6926916838, 0.0251826998, 0.2980921865,
+    -0.0497731008, -0.1289200932, -0.3040924072, -0.140168801,
+    0.0068126, -0.179777801, -4.873372
+  ), nrow = 17, ncol = 1)
+)
+
+# 10 year coefficients
+
+coefficients_10y <- list(
+  female_cvd = matrix(c(
+    0.7939329, 0.0305239, -0.1606857, -0.2394003, 0.360078, 0.8667604,
+    0.5360739, 0.6045917, 0.0433769, 0.3151672, -0.1477655, -0.0663612,
+    0.1197879, -0.0819715, 0.0306769, -0.0946348, -0.27057, -0.078715,
+    -0.1637806, -3.307728
+  ), nrow = 20, ncol = 1),
+  male_cvd = matrix(c(
+    0.7688528, 0.0736174, -0.0954431, -0.4347345, 0.3362658, 0.7692857,
+    0.4386871, 0.5378979, 0.0164827, 0.288879, -0.1337349, -0.0475924,
+    0.150273, -0.0517874, 0.0191169, -0.1049477, -0.2251948, -0.0895067,
+    -0.1543702, -3.031168
+  ), nrow = 20, ncol = 1),
+  female_ascvd = matrix(c(
+    0.7198830247, 0.1176967025, -0.1511850059, -0.0835357979, 0.3592852056,
+    0.8348584771, 0.4831078053, 0.4864619076, 0.039777901, 0.2265308946,
+    -0.0592373982, -0.0395761989, 0.0844423026, -0.0567838997,
+    0.0325691998, -0.1035984978, -0.241754204, -0.0791141987,
+    -0.167149201, -3.819974899
+  ), nrow = 20, ncol = 1),
+  male_ascvd = matrix(c(
+    0.7099847198, 0.1658663005, -0.1144284979, -0.2837212086, 0.3239977062,
+    0.7189596891, 0.3956972957, 0.369007498, 0.0203619003, 0.2036522031,
+    -0.0865581036, -0.0322915986, 0.1145630032, -0.0300005004,
+    0.0232746992, -0.0927024037, -0.2018525004, -0.0970527008,
+    -0.1217081025, -3.500654936
+  ), nrow = 20, ncol = 1),
+  female_hf = matrix(c(
+    0.8998234868, -0.4559771121, 0.3576504886, 1.038346052, 0.5839160085,
+    -0.0072293999, 0.2997705936, 0.7451637983, 0.0557086989, 0.3534441888,
+    -0.0981511027, -0.0946663022, -0.3581041098, -0.1159453019,
+    -0.003878, -0.1884288937, -4.310409069
+  ), nrow = 17, ncol = 1),
+  male_hf = matrix(c(
+    0.8972641826, -0.6811466217, 0.3634460866, 0.9237759709, 0.5023735762,
+    -0.0485840999, 0.3726929128, 0.6926916838, 0.0251826998, 0.2980921865,
+    -0.0497731008, -0.1289200932, -0.3040924072, -0.140168801,
+    0.0068126, -0.179777801, -3.946391106
+  ), nrow = 17, ncol = 1)
+)
+
+# predictors for each outcome
+outcomes <- list(
+  cvd = list(
+    var = "cvd",
+    covars = c(
+      "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+      "smoker", "egfr1", "egfr2", "antihtn", "statin",
+      "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+      "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+    )
+  ),
+  ascvd = list(
+    var = "ascvd",
+    covars = c(
+      "age", "nonhdlc", "hdlc", "sbp1", "sbp2", "diabetes",
+      "smoker", "egfr1", "egfr2", "antihtn", "statin",
+      "sbp2treat", "nonhdlctreat", "agenonhdlc", "agehdlc",
+      "agesbp2", "agediabetes", "agecursmk", "ageegfr1", "cons"
+    )
+  ),
+  hf = list(
+    var = "hf",
+    covars = c(
+      "age", "sbp1", "sbp2", "diabetes", "smoker", "bmi1", "bmi2",
+      "egfr1", "egfr2", "antihtn", "sbp2treat", "agesbp2",
+      "agediabetes", "agecursmk", "agebmi2", "ageegfr1", "cons"
+    )
+  )
+)
+```
+
+
+```{r}
+append_predicted_risks <- function(raw, outcomes, coefficients, prefix = "") {
+  for (outcome_name in names(outcomes)) {
+    new_colname <- paste0(prefix, "_prevent_", outcome_name)
+    raw[, (new_colname) := NA_real_]
+  }
+  
+  for (outcome_name in names(outcomes)) {
+    covars <- outcomes[[outcome_name]]$covars
+    
+    for (gender_val in c(0, 1)) {
+      gender_str <- ifelse(gender_val == 1, "female", "male")
+      coef_key <- paste0(gender_str, "_", outcome_name)
+      coef_vec <- coefficients[[coef_key]]
+      
+      # subset for gender
+      subset_idx <- raw$sex == gender_val
+      data_subset <- raw[subset_idx]
+      X <- as.matrix(data_subset[, ..covars])
+      
+      # compute predicted probabilities
+      logit <- X %*% coef_vec
+      prob <- plogis(logit)
+      
+      # assign
+      new_colname <- paste0(prefix, "_prevent_", outcome_name)
+      raw[subset_idx, (new_colname) := prob]
+    }
+  }
+  
+  return(raw)
+}
+
+
+# apply
+data <- fread('../../data/relax_cohort2/transformed_data.csv')
+data <- append_predicted_risks(data, outcomes, coefficients_5y, prefix = '5y')
+data <- append_predicted_risks(data, outcomes, coefficients_10y, prefix = '10y')
+```
+
+
+## Local Models
+
+## Logic: for patients in both relax and strict cohort, copy paste their local model probabilities from strict to relax
+## for other patients, use local models trained on all strict cohort for risk prediction on relax cohort
+
+## Stage 1: Copy Paste
+
+
+```{r}
+strict <- fread('../../data/strict_cohort2/all_data.csv')
+
+# init columns
+new_cols <- c(
+  "10y_local_cvd", "10y_local_ascvd", "10y_local_hf", "5y_local_cvd",
+  "5y_local_ascvd", "5y_local_hf", "10y_race_cvd", "10y_race_ascvd",
+  "10y_race_hf", "5y_race_cvd", "5y_race_ascvd", "5y_race_hf",
+  "10y_sdoh_cvd", "10y_sdoh_ascvd", "10y_sdoh_hf", "5y_sdoh_cvd",
+  "5y_sdoh_ascvd", "5y_sdoh_hf"
+)
+
+for (col in new_cols) {
+  data[[col]] <- NA_real_
+}
+
+# Set keys for joining on PATID
+setkey(data, PATID)
+setkey(strict, PATID)
+
+# copy paste
+for (col in new_cols) {
+  data[strict, (col) := strict[[col]], on = "PATID"]}
+```
+
+
+
+## Stage 2: Local Models Trained on All Strict Cohort
+
+```{r}
+local_formulas <- list(
+  cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1",
+  ascvd = "Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1",
+  hf = "Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1")
+
+race_formulas <- list(
+  cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1 + race",
+  ascvd = "Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1 + race",
+  hf = "Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1 + race")
+
+sdoh_formulas <- list(
+  cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                           diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                           nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                           agecursmk + ageegfr1 + race + ADI_NATRANK_BIN",
+  ascvd = "Surv(time2ascvd_10y, ascvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
+                             diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
+                             nonhdlctreat + agenonhdlc + agehdlc + agesbp2 + agediabetes +
+                             agecursmk + ageegfr1 + race + ADI_NATRANK_BIN",
+  hf = "Surv(time2hf_10y, hf_10y) ~ age + sbp1 + sbp2 +
+                         diabetes + smoker + bmi1 + bmi2 + egfr1 + egfr2 + antihtn + sbp2treat +
+                         agesbp2 + agediabetes + agecursmk + agebmi2 + ageegfr1 + race + ADI_NATRANK_BIN")
+
+formula_list <- list(
+  local = local_formulas,
+  race = race_formulas,
+  sdoh = sdoh_formulas
+)
+
+# loop through each formula set
+for (form_name in names(formula_list)) {
+  formulas <- formula_list[[form_name]]
+  
+  for (event in names(formulas)) {
+    formula_str <- formulas[[event]]
+    
+    for (gender_val in c(0, 1)) {
+      gender_str <- ifelse(gender_val == 1, "female", "male")
+      df <- strict[sex == gender_val]
+      
+      # Fit Cox model
+      model <- coxph(as.formula(formula_str), data = df)
+      
+      # Save model
+      filename <- paste0("../model/", form_name, "_", event, "_", gender_str, ".rds")
+      saveRDS(model, file = filename)
+    }
+  }
+}
+```
+
+
+```{r}
+model_specs <- list(
+  list(file = "local_cvd", col = "5y_local_cvd", year = 5, event = "cvd"),
+  list(file = "local_ascvd", col = "5y_local_ascvd", year = 5, event = "ascvd"),
+  list(file = "local_hf", col = "5y_local_hf", year = 5, event = "hf"),
+  list(file = "race_cvd", col = "5y_race_cvd", year = 5, event = "cvd"),
+  list(file = "race_ascvd", col = "5y_race_ascvd", year = 5, event = "ascvd"),
+  list(file = "race_hf", col = "5y_race_hf", year = 5, event = "hf"),
+  list(file = "sdoh_cvd", col = "5y_sdoh_cvd", year = 5, event = "cvd"),
+  list(file = "sdoh_ascvd", col = "5y_sdoh_ascvd", year = 5, event = "ascvd"),
+  list(file = "sdoh_hf", col = "5y_sdoh_hf", year = 5, event = "hf"),
+  list(file = "local_cvd", col = "10y_local_cvd", year = 10, event = "cvd"),
+  list(file = "local_ascvd", col = "10y_local_ascvd", year = 10, event = "ascvd"),
+  list(file = "local_hf", col = "10y_local_hf", year = 10, event = "hf"),
+  list(file = "race_cvd", col = "10y_race_cvd", year = 10, event = "cvd"),
+  list(file = "race_ascvd", col = "10y_race_ascvd", year = 10, event = "ascvd"),
+  list(file = "race_hf", col = "10y_race_hf", year = 10, event = "hf"),
+  list(file = "sdoh_cvd", col = "10y_sdoh_cvd", year = 10, event = "cvd"),
+  list(file = "sdoh_ascvd", col = "10y_sdoh_ascvd", year = 10, event = "ascvd"),
+  list(file = "sdoh_hf", col = "10y_sdoh_hf", year = 10, event = "hf")
+)
+
+for (spec in model_specs) {
+  for (gender_val in c(0, 1)) {
+    gender_str <- ifelse(gender_val == 1, "female", "male")
+    
+    # Subset to rows of this gender
+    row_indices <- which(data$sex == gender_val)
+    
+    # From those, find rows where the target risk column is missing
+    na_indices_in_group <- which(is.na(data[[spec$col]][row_indices]))
+    
+    # Get actual global row indices to update later
+    target_indices <- row_indices[na_indices_in_group]
+    
+    # Subset of data to predict on
+    test_data <- data[target_indices]
+
+    # Load model
+    model_path <- paste0("../model/", spec$file, "_", gender_str, ".rds")
+    cox_model <- readRDS(model_path)
+    
+    # Predict linear predictors
+    cox_lp <- predict(cox_model, newdata = test_data, type = "lp")
+    
+    # Baseline survival at specified time
+    baseline_surv <- survfit(cox_model)
+    surv_val <- summary(baseline_surv, times = spec$year, extend = TRUE)$surv
+    
+    # Compute risk
+    risk <- 1 - surv_val ^ exp(cox_lp)
+    
+    # Assign predicted risk to the correct positions in the full data
+    data[target_indices, (spec$col) := risk]
+  }
+}
+```
+
+
+
+## Save
+
+```{r}
+# save
+write.csv(data, '../../data/relax_cohort2/all_data.csv', row.names = FALSE)
+```
