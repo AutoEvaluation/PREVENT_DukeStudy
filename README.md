@@ -43,6 +43,7 @@ code/
 │
 ├── cohort_development/
 │   ├── relax_cohort_dnn_model.ipynb
+│   ├── relax_cohort.Rmd
 │   ├── relax_cohort_race_sex_imputation.ipynb
 │   ├── strict_cohort.Rmd
 │   └── strict_cohort_dnn_model.ipynb
