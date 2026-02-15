@@ -1166,12 +1166,13 @@ write.csv(raw, '../../data/relax_cohort2/cleaned_data.csv', row.names = FALSE)
 ```{r}
 # load
 data = fread('../../data/relax_cohort2/cleaned_data.csv')
-data[, tc := ifelse(is.na(tc), median(tc, na.rm = TRUE), tc)]
-data[, hdlc := ifelse(is.na(hdlc), median(hdlc, na.rm = TRUE), hdlc)]
-data[, bmi := ifelse(is.na(bmi), median(bmi, na.rm = TRUE), bmi)]
-data[, scre := ifelse(is.na(scre), median(scre, na.rm = TRUE), scre)]
-data[, sbp := ifelse(is.na(sbp), median(sbp, na.rm = TRUE), sbp)]
-data[, eGFR := ifelse(is.na(eGFR), median(eGFR, na.rm = TRUE), eGFR)]
+# Impute missing values with subgroup-specific medians (race + sex)
+data[, tc := ifelse(is.na(tc), median(tc, na.rm = TRUE), tc), by = .(race, sex)]
+data[, hdlc := ifelse(is.na(hdlc), median(hdlc, na.rm = TRUE), hdlc), by = .(race, sex)]
+data[, bmi := ifelse(is.na(bmi), median(bmi, na.rm = TRUE), bmi), by = .(race, sex)]
+data[, scre := ifelse(is.na(scre), median(scre, na.rm = TRUE), scre), by = .(race, sex)]
+data[, sbp := ifelse(is.na(sbp), median(sbp, na.rm = TRUE), sbp), by = .(race, sex)]
+data[, eGFR := ifelse(is.na(eGFR), median(eGFR, na.rm = TRUE), eGFR), by = .(race, sex)]
 ```
 
 
@@ -1268,7 +1269,7 @@ data <- data %>%
       include.lowest = TRUE))
 
 # save
-write.csv(data, '../../data/relax_cohort2/transformed_data.csv', row.names = FALSE)
+write.csv(data, '../../data/relax_cohort2/transformed_data2.csv', row.names = FALSE)
 ```
 
 
@@ -1429,7 +1430,7 @@ append_predicted_risks <- function(raw, outcomes, coefficients, prefix = "") {
 
 
 # apply
-data <- fread('../../data/relax_cohort2/transformed_data.csv')
+data <- fread('../../data/relax_cohort2/transformed_data2.csv')
 data <- append_predicted_risks(data, outcomes, coefficients_5y, prefix = '5y')
 data <- append_predicted_risks(data, outcomes, coefficients_10y, prefix = '10y')
 ```
@@ -1473,6 +1474,8 @@ for (col in new_cols) {
 ## Stage 2: Local Models Trained on All Strict Cohort
 
 ```{r}
+set.seed(123)
+
 local_formulas <- list(
   cvd = "Surv(time2cvd_10y, cvd_10y) ~ age + nonhdlc + hdlc + sbp1 + sbp2 +
                            diabetes + smoker + egfr1 + egfr2 + antihtn + statin + sbp2treat +
@@ -1563,6 +1566,7 @@ model_specs <- list(
   list(file = "sdoh_hf", col = "10y_sdoh_hf", year = 10, event = "hf")
 )
 
+
 for (spec in model_specs) {
   for (gender_val in c(0, 1)) {
     gender_str <- ifelse(gender_val == 1, "female", "male")
@@ -1578,6 +1582,7 @@ for (spec in model_specs) {
     
     # Subset of data to predict on
     test_data <- data[target_indices]
+    setDT(test_data)
 
     # Load model
     model_path <- paste0("../model/", spec$file, "_", gender_str, ".rds")
@@ -1605,5 +1610,5 @@ for (spec in model_specs) {
 
 ```{r}
 # save
-write.csv(data, '../../data/relax_cohort2/all_data.csv', row.names = FALSE)
+write.csv(data, '../../data/relax_cohort2/all_data2.csv', row.names = FALSE)
 ```
